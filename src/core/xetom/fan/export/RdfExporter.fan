@@ -92,18 +92,7 @@ class RdfExporter : Exporter
       if (target == null) throw UnsupportedErr("Mixin target not found: ${targetQname}")
       mixinShape(target, contributions)
     }
-    if (!quantityKeys.isEmpty)
-    {
-      qname("sys::UnitQuantityShape").w(" a sh:NodeShape ;").nl
-      w("  sh:nodeKind sh:IRI ;").nl
-      w("  sh:in (")
-      quantityKeys.keys.sort.each |key, i|
-      {
-        if (i > 0) w(" ")
-        qname("sys::UnitQuantity.$key")
-      }
-      w(") .").nl
-    }
+    writeQuantityShape
     quantityKeys.keys.sort.each |key|
     {
       qname("sys::UnitQuantity.$key").w(" a ").qname("sys::UnitQuantity")
@@ -123,6 +112,57 @@ class RdfExporter : Exporter
     if (spec.isType) return cls(spec)
     if (spec.isGlobal) return global(spec)
     throw UnsupportedErr("RDF export target is neither a type nor a global: ${spec.qname}")
+  }
+
+  ** Compile only the requested type and nested shape dependencies using the
+  ** schema exporter's existing constraints, with no automatic record targets.
+  internal This queryResultShapes(Spec resultType)
+  {
+    this.resultConstraints = true
+    this.curLib = resultType.lib
+    validateNamespaceVersions(resultType.lib)
+    prefixDefs(resultType.lib)
+    pendingResultShapes.add(resultType)
+    emitted := Str:Bool[:]
+    while (!pendingResultShapes.isEmpty)
+    {
+      type := pendingResultShapes.removeAt(0)
+      if (emitted.containsKey(type.qname)) continue
+      emitted[type.qname] = true
+      // This document always declares the explicit sys prefix, not a default prefix.
+      this.isSys = false
+      w(nodeShapeRef(type.qname)).w(" a sh:NodeShape ;").nl
+      props := type.slots.list.findAll |Spec s->Bool| { !s.isMarker }
+      markers := type.slots.list.findAll |Spec s->Bool| { s.isMarker }
+      typeConstraints(type, props, markers)
+      w(".").nl
+    }
+    writeQuantityShape
+    return this
+  }
+
+  private Str nodeShapeRef(Str name)
+  {
+    if (!resultConstraints) return qnameToUri(name)
+    lib := requireQNameLibrary(name, "result shape")
+    split := name.index("::") ?: throw UnsupportedErr("Invalid result shape name: $name")
+    if (name != "sys::UnitQuantityShape")
+      pendingResultShapes.add(ns.spec(name, false) ?: lib.spec(name[split+2..-1]))
+    return "<${libUri(lib)}#${name[split+2..-1]}/constraints>"
+  }
+
+  private Void writeQuantityShape()
+  {
+    if (quantityKeys.isEmpty) return
+    w(nodeShapeRef("sys::UnitQuantityShape")).w(" a sh:NodeShape ;").nl
+    w("  sh:nodeKind sh:IRI ;").nl
+    w("  sh:in (")
+    quantityKeys.keys.sort.each |key, i|
+    {
+      if (i > 0) w(" ")
+      qname("sys::UnitQuantity.$key")
+    }
+    w(") .").nl
   }
 
 //////////////////////////////////////////////////////////////////////////
@@ -263,25 +303,7 @@ class RdfExporter : Exporter
     if (hasShape)
     {
       w("  sh:targetClass ").qname(x.qname).w(" ;").nl
-      if (x.isCompound && x.isOr)
-      {
-        w("  sh:or (").nl
-        x.bases.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
-        w("  ) ;").nl
-      }
-      if (isAbstract)
-      {
-        // Concrete descendants remain valid; reject only an instance whose
-        // rdf:type directly names this abstract spec.
-        w("  sh:not [").nl
-        w("    sh:property [").nl
-        w("      sh:path rdf:type ;").nl
-        w("      sh:hasValue ").qname(x.qname).nl
-        w("    ]").nl
-        w("  ] ;").nl
-      }
-      props.each |s| { propShape(s) }
-      markers.each |s| { if (!s.isMaybe) markerShape(s) }
+      typeConstraints(x, props, markers)
     }
 
     w(".").nl
@@ -302,6 +324,30 @@ class RdfExporter : Exporter
     }
 
     return this
+  }
+
+  ** Shared constraints for schema export and query-result conformance.
+  private Void typeConstraints(Spec x, Spec[] props, Spec[] markers)
+  {
+    if (x.isCompound && x.isOr)
+    {
+      w("  sh:or (").nl
+      x.bases.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
+      w("  ) ;").nl
+    }
+    if (x.meta.has("abstract"))
+    {
+      // Concrete descendants remain valid; reject only an instance whose
+      // rdf:type directly names this abstract spec.
+      w("  sh:not [").nl
+      w("    sh:property [").nl
+      w("      sh:path rdf:type ;").nl
+      w("      sh:hasValue ").qname(x.qname).nl
+      w("    ]").nl
+      w("  ] ;").nl
+    }
+    props.each |s| { propShape(s) }
+    markers.each |s| { if (!s.isMaybe) markerShape(s) }
   }
 
   ** Emit only this library's contribution to a dependency-owned target. The
@@ -416,7 +462,7 @@ class RdfExporter : Exporter
     }
     else if (type.isEnum)
     {
-      if (type.qname == "sys::UnitQuantity") sh["node"] = qnameToUri("sys::UnitQuantityShape")
+      if (type.qname == "sys::UnitQuantity") sh["node"] = nodeShapeRef("sys::UnitQuantityShape")
       else sh["datatype"] = "xsd:string"
     }
     else if (type.isChoice)
@@ -432,7 +478,7 @@ class RdfExporter : Exporter
     }
     else if (type.isDict)
     {
-      sh["node"] = qnameToUri(type.qname)
+      sh["node"] = nodeShapeRef(type.qname)
     }
     else if (type.qname == "sys::Obj")
     {
@@ -1743,5 +1789,7 @@ class RdfExporter : Exporter
 //////////////////////////////////////////////////////////////////////////
 
   private Bool isSys
+  private Bool resultConstraints
+  private Spec[] pendingResultShapes := Spec[,]
   private static const Regex queryPathRef := Regex<|(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*::[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)|>
 }
