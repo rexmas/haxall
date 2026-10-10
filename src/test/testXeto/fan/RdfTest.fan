@@ -16,6 +16,29 @@ using haystack
 **
 class RdfTest : AbstractXetoTest
 {
+  Void testRdfQueryResultShaclShapes()
+  {
+    ns := XetoEnv.cur.resolveNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Bare: Dict {}
+           Detail: Dict { ready, quantity: UnitQuantity? }
+           Result: Dict { detail: Detail, empty: Bare, quantity: UnitQuantity? }
+           Recursive: Dict { child: Recursive? }|>)
+    shapes := RdfQueryResultShaclShapes.compile(ns, lib.spec("Result"))
+    rdf := shapes.turtleShapes
+    verify(shapes.resultShapeIri.endsWith("#Result/constraints"))
+    verify(rdf.contains("#Detail/constraints>"), rdf)
+    verify(rdf.contains("#Bare/constraints> a sh:NodeShape"), rdf)
+    verify(rdf.contains("sh:hasValue ${lib.name}:Detail.ready"), rdf)
+    verifyFalse(rdf.contains("sh:target"), rdf)
+    verifyFalse(rdf.contains("owl:imports"), rdf)
+    verifyFalse(rdf.contains("a rdfs:Class"), rdf)
+    verifyEq(countMatches(rdf, "#UnitQuantityShape/constraints> a sh:NodeShape"), 1)
+    recursive := RdfQueryResultShaclShapes.compile(ns, lib.spec("Recursive"))
+    verifyEq(countMatches(recursive.turtleShapes, "#Recursive/constraints> a sh:NodeShape"), 1)
+    verifyErr(UnsupportedErr#) { RdfQueryResultShaclShapes.compile(ns, ns.spec("sys::Str")) }
+  }
+
   Void testEffectiveInheritanceAndMarkers()
   {
     rdf := export(
