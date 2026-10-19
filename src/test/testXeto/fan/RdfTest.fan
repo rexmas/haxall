@@ -386,7 +386,7 @@ class RdfTest : AbstractXetoTest
     }
     catch (UnsupportedErr err)
     {
-      verify(err.msg.contains("RDF query body mapping not supported for required member"), err.msg)
+      verify(err.msg.contains("RDF query body mapping not supported for member"), err.msg)
       verify(err.msg.endsWith("::Equip.points.point"), err.msg)
     }
 
@@ -510,7 +510,9 @@ class RdfTest : AbstractXetoTest
     verify(equip.contains("temp:Equip.commissioned \"2026-08-11\"^^xsd:date ;"), equip)
     verify(equip.contains("temp:Equip.suit \"Clubs\"^^xsd:string ;"), equip)
     verify(equip.contains("temp:Equip.siteRef temp:site1 ;"), equip)
-    verifyEq(countMatches(equip, "temp:Equip.related "), 2)
+    verifyEq(countMatches(equip, "temp:Equip.related temp:"), 2)
+    verify(equip.contains("sys:hasRefField temp:Equip.related ;"), equip)
+    verify(equip.contains("sys:hasRefField temp:Equip.siteRef ;"), equip)
     verify(equip.contains("sys:hasMarker temp:Equip.equip ;"), equip)
     verify(equip.contains("temp:Equip.address [\n    a temp:Address ;"), equip)
     verify(equip.contains("temp:Address.city \"Richmond\"^^xsd:string ;"), equip)
@@ -520,6 +522,7 @@ class RdfTest : AbstractXetoTest
 
     person := instanceBlock(rdf, "person1")
     verify(person.contains("temp:Person.address temp:address1 ;"), person)
+    verifyFalse(person.contains("sys:hasRefField temp:Person.address"), person)
     address := instanceBlock(rdf, "address1")
     verify(address.contains("a sys:Entity, temp:Address ;"), address)
     verify(address.contains("temp:Address.city \"Norfolk\"^^xsd:string ;"), address)
@@ -625,10 +628,12 @@ class RdfTest : AbstractXetoTest
 
     entity := instanceBlock(rdf, "entity1")
     verify(entity.contains("temp:Entity.orgRef temp:org1 ;"), entity)
+    verify(entity.contains("sys:hasRefField temp:Entity.orgRef ;"), entity)
     verifyFalse(entity.contains("sys:Entity.orgRef"), entity)
 
     employee := instanceBlock(rdf, "employee1")
     verify(employee.contains("temp:Entity.orgRef temp:org1 ;"), employee)
+    verify(employee.contains("sys:hasRefField temp:Entity.orgRef ;"), employee)
     verifyFalse(employee.contains("temp:Employee.orgRef"), employee)
   }
 
@@ -865,28 +870,34 @@ class RdfTest : AbstractXetoTest
              @point1: Point { equipRef: @equip1 }|>)
 
     points := propertyShape(rdf, "[ sh:oneOrMorePath [ sh:inversePath temp:Point.equipRef ] ]")
-    verify(points.contains("sh:class temp:Point ;"), points)
+    verifyFalse(points.contains("sh:class"), points)
     verifyFalse(points.contains("sh:minCount"), points)
     verifyFalse(points.contains("sh:maxCount"), points)
 
     equips := propertyShape(rdf, "[ sh:oneOrMorePath temp:Point.equipRef ]")
-    verify(equips.contains("sh:class temp:Equip ;"), equips)
+    verifyFalse(equips.contains("sh:class"), equips)
     verifyFalse(equips.contains("sh:minCount"), equips)
     verifyFalse(equips.contains("sh:maxCount"), equips)
 
     plain := propertyShape(rdf, "Equip.plain")
-    verify(plain.contains("sh:class temp:Point ;"), plain)
+    verifyFalse(plain.contains("sh:class"), plain)
     verifyFalse(plain.contains("sh:minCount"), plain)
     verifyFalse(plain.contains("sh:maxCount"), plain)
 
     point := instanceBlock(rdf, "point1")
     verify(point.contains("temp:Point.equipRef temp:equip1 ;"), point)
+    verify(point.contains("sys:hasRefField temp:Point.equipRef ;"), point)
     equip := instanceBlock(rdf, "equip1")
     verifyFalse(equip.contains("temp:Equip.points"), equip)
   }
 
   Void testQueryPathValidation()
   {
+    verifyUnsupportedFragments(
+      Str<|Point : Dict
+           Holder : Dict { values: Query { point: Point? } }|>,
+      ["RDF query body mapping not supported for member", "point"])
+
     verifyUnsupportedFragments(
       Str<|Point : Dict
            Holder : Dict {
@@ -925,7 +936,7 @@ class RdfTest : AbstractXetoTest
              }
              Point : Dict { equipRef: Ref<of:Equip, maybe> }|>)
     direct := propertyShape(rdf, "[ sh:inversePath temp:Point.equipRef ]")
-    verify(direct.contains("sh:class temp:Point ;"), direct)
+    verifyFalse(direct.contains("sh:class"), direct)
   }
 
   Void testUnsupportedListItemTypesFailClosed()
