@@ -417,9 +417,9 @@ class RdfExporter : Exporter
 
     if (slot.isQuery)
     {
-      required := slot.slotsOwn.list.find |Spec member->Bool| { !member.isMaybe }
-      if (required != null)
-        throw UnsupportedErr("RDF query body mapping not supported for required member ${required.qname}")
+      member := slot.slots.list.first
+      if (member != null)
+        throw UnsupportedErr("RDF query body mapping not supported for member ${member.qname}")
     }
 
     // build constraints
@@ -436,8 +436,7 @@ class RdfExporter : Exporter
     datatype := isLiteral ? scalarDatatype(type) : null
     if (slot.isQuery)
     {
-      of := slot.of(false)
-      if (of != null) sh["class"] = qnameToUri(of.qname)
+      // `of` filters query results; it is not a constraint on every reached record.
       hasMinCount = false
       hasMaxCount = false
     }
@@ -1373,13 +1372,15 @@ class RdfExporter : Exporter
     if (type.isRef)
     {
       ref := val as Ref ?: throw UnsupportedErr("Expected Ref for ${property}, not ${val.typeof}")
-      w(indent).qname(property).w(" ").id(ref).w(" ;").nl
+      instanceRefValue(property, ref, indent)
+      refField(property, indent)
       return
     }
 
     if (type.isMultiRef)
     {
       instanceMultiRef(property, val, indent)
+      refField(property, indent)
       return
     }
 
@@ -1505,6 +1506,11 @@ class RdfExporter : Exporter
   private Void instanceRefValue(Str property, Ref ref, Str indent)
   {
     w(indent).qname(property).w(" ").id(ref).w(" ;").nl
+  }
+
+  private Void refField(Str property, Str indent)
+  {
+    w(indent).w(isSys ? ":hasRefField" : "sys:hasRefField").w(" ").qname(property).w(" ;").nl
   }
 
   private Void instanceNested(Str property, Dict nested, Str indent)
