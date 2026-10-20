@@ -16,6 +16,40 @@ using haystack
 **
 class RdfTest : AbstractXetoTest
 {
+  Void testRdfQueryCompiler()
+  {
+    ns := XetoEnv.cur.resolveNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Target: Dict { hit }
+           Child: Target { extra }
+           Holder: Dict {
+             next: Ref?
+             direct: Query<of:Target, via:"next">
+             deep: Query<of:Target, via:"next+">
+             star: Query<of:Target, via:"next*">
+           }
+           Inherited: Holder {}
+           Loose: Dict {}|>)
+    compiler := RdfQueryCompiler(ns, lib)
+    direct := compiler.compile("Holder.direct", "urn:source")
+    deep := compiler.compile("Holder.deep", "urn:source")
+    verifyEq(direct.plan.traversal.repetition, RdfQueryRepetition.oneHop)
+    verifyEq(deep.plan.traversal.repetition, RdfQueryRepetition.oneOrMore)
+    verifyEq(direct.plan.traversal.propertyIris, deep.plan.traversal.propertyIris)
+    verify(direct.plan.traversal.propertyIris.any |p| { p.endsWith("#Holder.next") })
+    verifyFalse(direct.plan.traversal.propertyIris.any |p| { p.endsWith("#Inherited.next") })
+    verify(direct.plan.traversal.propertyIris.any |p| { p.endsWith("#Loose.next") })
+    verifyEq(direct.plan.resultClassIris.size, 2)
+    verify(direct.boundSparql.contains("VALUES ?subject { <urn:source> }"))
+    verifyFalse(direct.sparql.contains("VALUES ?subject"))
+    verify(deep.inputShapes.contains("sh:zeroOrMorePath"))
+    verify(direct.inputShapes.contains("#hasRefField>"))
+    verify(direct.resultShapes.resultShapeIri.endsWith("#Target/constraints"))
+    verifyErr(ReadonlyErr#) { direct.plan.resultClassIris.clear }
+    verifyErr(ArgErr#) { compiler.compile("Holder.direct", "urn:a> ?x ?y") }
+    verifyErr(UnsupportedErr#) { compiler.resolve("Holder.star") }
+  }
+
   Void testRdfQueryResultShaclShapes()
   {
     ns := XetoEnv.cur.resolveNamespace(["sys"])
