@@ -1298,7 +1298,7 @@ class RdfExporter : Exporter
     }
   }
 
-  private Str[] instanceProperties(Spec spec, Str property)
+  internal static Str[] instanceProperties(Spec spec, Str property)
   {
     properties := Str:Bool[:]
     properties[property] = true
