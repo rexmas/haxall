@@ -26,6 +26,8 @@ class RdfTest : AbstractXetoTest
              next: Ref?
              direct: Query<of:Target, via:"next">
              deep: Query<of:Target, via:"next+">
+             inverse: Query<of:Target, inverse:"Holder.direct">
+             inverseDeep: Query<of:Target, inverse:"Holder.deep">
              star: Query<of:Target, via:"next*">
            }
            Inherited: Holder {}
@@ -34,6 +36,10 @@ class RdfTest : AbstractXetoTest
     direct := compiler.compile("Holder.direct", "urn:source")
     deep := compiler.compile("Holder.deep", "urn:source")
     verifyEq(direct.plan.traversal.repetition, RdfQueryRepetition.oneHop)
+    verifyEq(direct.plan.traversal.direction, RdfQueryDirection.forward)
+    // Native execution does not resolve unqualified inverse Query names.
+    verifyErr(UnsupportedErr#) { compiler.resolve("Holder.inverse") }
+    verifyErr(UnsupportedErr#) { compiler.resolve("Holder.inverseDeep") }
     verifyEq(deep.plan.traversal.repetition, RdfQueryRepetition.oneOrMore)
     verifyEq(direct.plan.traversal.propertyIris, deep.plan.traversal.propertyIris)
     verify(direct.plan.traversal.propertyIris.any |p| { p.endsWith("#Holder.next") })
