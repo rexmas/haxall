@@ -45,12 +45,7 @@ class RdfExporter : Exporter
 
   override This lib(Lib lib)
   {
-    this.curLib = lib
-    this.quantityKeys.clear
-    this.instanceMemberSpecs.clear
-    this.isSys = lib.name == "sys"
-    validateNamespaceVersions(lib)
-    prefixDefs(lib)
+    prepareLibrary(lib)
     if (instancesOnly)
     {
       lib.instances.each |x| { instance(x) }
@@ -454,9 +449,10 @@ class RdfExporter : Exporter
     }
     else if (type.isRef || type.isMultiRef)
     {
-      of := slot.of(false)?.qname ?: "sys::Entity"
+      of := slot.of(false)?.qname
       sh["nodeKind"] = "sh:IRI"
-      sh["class"] = qnameToUri(of)
+      // A stored spec Ref names a schema type, not a runtime Entity.
+      sh["class"] = of == null && slot.name == "spec" ? "rdfs:Class" : qnameToUri(of ?: "sys::Entity")
       if (type.isMultiRef) hasMaxCount = false
     }
     else if (type.isEnum)
@@ -496,6 +492,7 @@ class RdfExporter : Exporter
     w("  sh:property [").nl
     w("    sh:path ")
     if (slot.isQuery) queryPath(slot)
+    else if (slot.name == "spec") qname("sys::spec")
     else qname(slot.qname)
     w(" ;").nl
     sh.each |v, n| { w("    sh:").w(n).w(" ").w(v).w(" ;").nl }
@@ -578,7 +575,7 @@ class RdfExporter : Exporter
       source = source[0..-2]
     }
 
-    property := resolveQueryName(query, source)
+    property := source == "spec" ? "sys::spec" : resolveQueryName(query, source)
     if (!quantifier.isEmpty)
       w(quantifier == "+" ? "[ sh:oneOrMorePath " : "[ sh:zeroOrMorePath ")
     if (inverse) w("[ sh:inversePath ")
@@ -1240,6 +1237,25 @@ class RdfExporter : Exporter
 // Instances
 //////////////////////////////////////////////////////////////////////////
 
+  ** Export a runtime snapshot using this library's resolved namespace.
+  ** The supplied records replace, rather than supplement, library instances.
+  This runtimeInstances(Lib lib, Dict[] records)
+  {
+    prepareLibrary(lib)
+    records.each |record| { instance(record) }
+    return this
+  }
+
+  private Void prepareLibrary(Lib lib)
+  {
+    this.curLib = lib
+    this.quantityKeys.clear
+    this.instanceMemberSpecs.clear
+    this.isSys = lib.name == "sys"
+    validateNamespaceVersions(lib)
+    prefixDefs(lib)
+  }
+
   override This instance(Dict instance)
   {
     id := instance.id
@@ -1255,6 +1271,9 @@ class RdfExporter : Exporter
 
   private Void instanceMembers(Dict instance, Spec spec, Str indent)
   {
+    // Preserve the stored value, not an inferred type or ancestor.
+    storedSpec := instance["spec"]
+    if (storedSpec != null) instanceMember("sys::spec", ns.spec("sys::Obj"), storedSpec, indent)
     storedNames := Str:Bool[:]
     instance.each |val, name| { storedNames[name] = true }
 

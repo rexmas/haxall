@@ -26,6 +26,10 @@ class RdfTest : AbstractXetoTest
              next: Ref?
              direct: Query<of:Target, via:"next">
              deep: Query<of:Target, via:"next+">
+             identity: Query<of:Target, via:"id">
+             identityDeep: Query<of:Target, via:"id+">
+             specRef: Query<of:Target, via:"spec">
+             specDeep: Query<of:Target, via:"spec+">
              inverse: Query<of:Target, inverse:"Holder.direct">
              inverseDeep: Query<of:Target, inverse:"Holder.deep">
              star: Query<of:Target, via:"next*">
@@ -37,6 +41,23 @@ class RdfTest : AbstractXetoTest
     deep := compiler.compile("Holder.deep", "urn:source")
     verifyEq(direct.plan.traversal.repetition, RdfQueryRepetition.oneHop)
     verifyEq(direct.plan.traversal.direction, RdfQueryDirection.forward)
+    ["Holder.identity", "Holder.identityDeep"].each |slot|
+    {
+      identity := compiler.compile(slot, "urn:source")
+      verifyEq(identity.plan.traversal.step, RdfQueryStep.identity)
+      verify(identity.plan.traversal.propertyIris.isEmpty)
+      verify(identity.boundSparql.contains("BIND(?subject AS ?result)"))
+      verify(identity.inputShapes.contains("sh:targetNode <urn:source>"))
+      verifyFalse(identity.inputShapes.contains("hasRefField"))
+    }
+    ["Holder.specRef", "Holder.specDeep"].each |slot|
+    {
+      specRef := compiler.compile(slot, "urn:source")
+      verifyEq(specRef.plan.traversal.step, RdfQueryStep.specReference)
+      verifyEq(specRef.plan.traversal.propertyIris.size, 1)
+      verify(specRef.plan.traversal.propertyIris.first.endsWith("#spec"))
+      verify(specRef.inputShapes.contains("#hasRefField>"))
+    }
     // Native execution does not resolve unqualified inverse Query names.
     verifyErr(UnsupportedErr#) { compiler.resolve("Holder.inverse") }
     verifyErr(UnsupportedErr#) { compiler.resolve("Holder.inverseDeep") }
@@ -54,6 +75,133 @@ class RdfTest : AbstractXetoTest
     verifyErr(ReadonlyErr#) { direct.plan.resultClassIris.clear }
     verifyErr(ArgErr#) { compiler.compile("Holder.direct", "urn:a> ?x ?y") }
     verifyErr(UnsupportedErr#) { compiler.resolve("Holder.star") }
+  }
+
+  Void testStoredSpecReference()
+  {
+    rdf := exportWithOpts(
+      Str<|Base: Dict {}
+           Child: Base {}
+           @reading: Child {}|>, Etc.dict1("instancesOnly", Marker.val))
+    reading := instanceBlock(rdf, "reading")
+    verify(reading.contains("sys:spec temp:Child"), reading)
+    verify(reading.contains("sys:hasRefField sys:spec"), reading)
+    verifyFalse(reading.contains("sys:spec temp:Base"), reading)
+  }
+
+  Void testDeclaredAndInheritedSpecConstraintsUseSharedProperty()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Record: Dict { spec: Ref }
+           Child: Record {}|>)
+    buf := Buf()
+    RdfExporter(ns, buf.out, Etc.dict1("schemaOnly", Marker.val)).start.lib(lib).end
+    schemaRdf := buf.flip.readAllStr.replace(lib.name, "temp")
+    ["Record", "Child"].each |name|
+    {
+      classShape := resourceBlock(schemaRdf, "temp:$name")
+      resultShapes := RdfQueryResultShaclShapes.compile(ns, lib.spec(name))
+        .turtleShapes.replace(lib.name, "temp")
+      [classShape, resultShapes].each |shape|
+      {
+        verify(shape.contains("sh:path sys:spec"), shape)
+        verify(shape.contains("sh:nodeKind sh:IRI"), shape)
+        verify(shape.contains("sh:class rdfs:Class"), shape)
+        verify(shape.contains("sh:minCount 1"), shape)
+        verify(shape.contains("sh:maxCount 1"), shape)
+        verifyFalse(shape.contains("sh:path temp:Record.spec"), shape)
+        verifyFalse(shape.contains("sh:path temp:Child.spec"), shape)
+      }
+      verifyFalse(resultShapes.contains("sh:target"), resultShapes)
+    }
+  }
+
+  Void testRuntimeExportUsesOnlySuppliedRecords()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Record: Dict {}
+           @libraryRecord: Record {}|>)
+    untyped := Etc.makeDict(["id":Ref("${lib.name}::untyped")])
+    typed := Etc.makeDict(["id":Ref("${lib.name}::typed"), "spec":Ref("${lib.name}::Record")])
+    buf := Buf()
+    RdfExporter(ns, buf.out, Etc.dict0).start.runtimeInstances(lib, [untyped, typed]).end
+    rdf := buf.flip.readAllStr.replace(lib.name, "temp")
+    untypedRdf := instanceBlock(rdf, "untyped")
+    verify(untypedRdf.contains("sys:Entity"), untypedRdf)
+    verifyFalse(untypedRdf.contains("sys:spec"), untypedRdf)
+    verifyFalse(untypedRdf.contains("sys:hasRefField"), untypedRdf)
+    typedRdf := instanceBlock(rdf, "typed")
+    verify(typedRdf.contains("sys:spec temp:Record"), typedRdf)
+    verify(typedRdf.contains("sys:hasRefField sys:spec"), typedRdf)
+    verifyFalse(rdf.contains("temp:libraryRecord"), rdf)
+  }
+
+  Void testQualifiedInverseIdentityAndSpecQueryCompilation()
+  {
+    ns := createNamespace(["sys"])
+    src := Str<|pragma: Lib <version:"0.0.0", depends:{{lib:"sys"}}>
+                Target: Dict {}
+                Holder: Dict {
+                  identity: Query<of:Target, via:"id">
+                  identityDeep: Query<of:Target, via:"id+">
+                  specRef: Query<of:Target, via:"spec">
+                  specDeep: Query<of:Target, via:"spec+">
+                  identityInverse: Query<of:Target, inverse:"test.rdf.inverse::Holder.identity">
+                  identityDeepInverse: Query<of:Target, inverse:"test.rdf.inverse::Holder.identityDeep">
+                  specInverse: Query<of:Target, inverse:"test.rdf.inverse::Holder.specRef">
+                  specDeepInverse: Query<of:Target, inverse:"test.rdf.inverse::Holder.specDeep">
+                }|>
+    // A fixed library name lets the fixture use fully qualified inverse names.
+    lib := XetoCompiler.init
+    {
+      it.ns = ns
+      it.libName = "test.rdf.inverse"
+      it.tempLib = true
+      it.input = src.toBuf.toFile(`inverse.xeto`)
+    }.compileLib
+    compiler := RdfQueryCompiler(ns, lib)
+    ["identityInverse":RdfQueryRepetition.oneHop,
+     "identityDeepInverse":RdfQueryRepetition.oneOrMore].each |repetition, name|
+    {
+      artifacts := compiler.compile("Holder.$name", "urn:source")
+      traversal := artifacts.plan.traversal
+      verifyEq(traversal.direction, RdfQueryDirection.inverse)
+      verifyEq(traversal.repetition, repetition)
+      verify(artifacts.inputShapes.contains("sh:targetNode <urn:source>"))
+      verifyEq(traversal.step, RdfQueryStep.identity)
+      verify(traversal.propertyIris.isEmpty)
+      verify(artifacts.boundSparql.contains("BIND(?subject AS ?result)"))
+      verifyFalse(artifacts.inputShapes.contains("hasRefField"))
+    }
+    sysVersion := ns.lib("sys").version
+    specIri := "http://xeto.dev/rdf/sys-${sysVersion}#spec"
+    ["specInverse":RdfQueryRepetition.oneHop,
+     "specDeepInverse":RdfQueryRepetition.oneOrMore].each |repetition, name|
+    {
+      artifacts := compiler.compile("Holder.$name", "urn:source")
+      traversal := artifacts.plan.traversal
+      verifyEq(traversal.direction, RdfQueryDirection.inverse)
+      verifyEq(traversal.repetition, repetition)
+      verifyEq(traversal.step, RdfQueryStep.specReference)
+      verifyEq(traversal.propertyIris, [specIri])
+      verify(artifacts.inputShapes.contains("sh:targetNode <urn:source>"))
+      switch (repetition)
+      {
+        case RdfQueryRepetition.oneHop:
+          verify(artifacts.boundSparql.contains("?subject ^(<$specIri>) ?result"))
+          verify(artifacts.boundSparql.contains("?referenceProperty ?subject"))
+          verifyFalse(artifacts.inputShapes.contains("sh:targetClass"))
+          verifyFalse(artifacts.inputShapes.contains("hasRefField"))
+        case RdfQueryRepetition.oneOrMore:
+          verify(artifacts.boundSparql.contains("?subject ^(<$specIri>)+ ?result"))
+          verifyFalse(artifacts.boundSparql.contains("?referenceProperty ?subject"))
+          verify(artifacts.inputShapes.contains("sh:targetClass"))
+          verify(artifacts.inputShapes.contains("hasRefField"))
+        default: fail("Unhandled repetition: $repetition")
+      }
+    }
   }
 
   Void testRdfQueryResultShaclShapes()

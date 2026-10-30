@@ -68,8 +68,7 @@ class RdfQueryCompiler
     if (via == null) throw UnsupportedErr("Missing via or inverse: $querySlot")
     repetition := via.endsWith("+") ? RdfQueryRepetition.oneOrMore : RdfQueryRepetition.oneHop
     tag := repetition == RdfQueryRepetition.oneOrMore ? via[0..<-1] : via
-    if (tag == "id") throw UnsupportedErr("Identity traversal via id is not supported: $querySlot")
-    if (tag == "spec") throw UnsupportedErr("Traversal via spec requires a special RDF mapping and is not supported: $querySlot")
+    step := tag == "id" ? RdfQueryStep.identity : (tag == "spec" ? RdfQueryStep.specReference : RdfQueryStep.reference)
     if (tag.isEmpty || !tag.all |ch| { ch.isAlphaNum && ch < 128 || ch == '_' })
       throw UnsupportedErr("via must name one tag, optionally followed by +: $querySlot")
     target := query.of(false) ?: throw UnsupportedErr("Missing of: $querySlot")
@@ -77,12 +76,13 @@ class RdfQueryCompiler
       throw UnsupportedErr("of must directly extend a local Dict: $querySlot")
 
     properties := Str:Bool[:]
+    if (step == RdfQueryStep.specReference) properties[iri("sys::spec")] = true
     classes := Str:Bool[:]
     libraries.vals.each |library|
     {
       library.types.list.each |spec|
       {
-        if (spec.isDict)
+        if (spec.isDict && step == RdfQueryStep.reference)
         {
           slot := spec.slot(tag, false)
           // An undeclared runtime tag exports under its owning record's type.
@@ -92,7 +92,7 @@ class RdfQueryCompiler
         if (library.name != "sys" && spec.isa(target)) classes[iri(spec.qname)] = true
       }
     }
-    traversal := RdfReferenceTraversal(tag, properties.keys.sort, repetition, direction)
+    traversal := RdfReferenceTraversal(tag, properties.keys.sort, repetition, direction, step)
     return RdfQueryPlan(query.qname, target, traversal, classes.keys.sort,
       iri("sys::Entity"), iri("sys::hasMarker"), iri("sys::hasRefField"))
   }
@@ -153,21 +153,24 @@ const class RdfQueryPlan
 ** The tag's RDF properties and the number of steps are independent choices.
 const class RdfReferenceTraversal
 {
-  internal new make(Str tag, Str[] propertyIris, RdfQueryRepetition repetition, RdfQueryDirection direction)
+  internal new make(Str tag, Str[] propertyIris, RdfQueryRepetition repetition, RdfQueryDirection direction, RdfQueryStep step)
   {
     this.tag = tag
     this.propertyIris = propertyIris.toImmutable
     this.repetition = repetition
     this.direction = direction
+    this.step = step
   }
   const Str tag
   const Str[] propertyIris
   const RdfQueryRepetition repetition
   const RdfQueryDirection direction
+  const RdfQueryStep step
 }
 
 enum class RdfQueryRepetition { oneHop, oneOrMore }
 enum class RdfQueryDirection { forward, inverse }
+enum class RdfQueryStep { reference, identity, specReference }
 
 ** Portable output: check inputs, execute SELECT, then optionally validate
 ** returned identities using resultShapes against the complete input graph.
@@ -202,14 +205,21 @@ internal class RdfQuerySparqlCompiler
   {
     out := StrBuf().add("SELECT DISTINCT ?result WHERE {\n")
     if (subjectIri != null) out.add("  VALUES ?subject { ${iriToken(subjectIri)} }\n")
-    path := "(" + plan.traversal.propertyIris.map |p->Str| { iriToken(p) }.join("|") + ")"
-    path = directionPrefix + path
-    path += repetitionSuffix(plan.traversal.repetition)
+    switch (plan.traversal.step)
+    {
+      case RdfQueryStep.identity: out.add("  BIND(?subject AS ?result)\n")
+      case RdfQueryStep.reference:
+      case RdfQueryStep.specReference:
+        path := "(" + plan.traversal.propertyIris.map |p->Str| { iriToken(p) }.join("|") + ")"
+        path = directionPrefix + path
+        path += repetitionSuffix(plan.traversal.repetition)
+        out.add("  ?subject $path ?result .\n")
+      default: throw UnsupportedErr("Unsupported query step")
+    }
     classes := plan.resultClassIris.map |p->Str| { iriToken(p) }.join(" ")
-    out.add("  ?subject $path ?result .\n")
     out.add("  ?result a ${iriToken(plan.entityClassIri)} .\n")
     out.add("  FILTER(isIRI(?result))\n")
-    if (plan.traversal.direction == RdfQueryDirection.inverse && plan.traversal.repetition == RdfQueryRepetition.oneHop)
+    if (plan.traversal.step != RdfQueryStep.identity && plan.traversal.direction == RdfQueryDirection.inverse && plan.traversal.repetition == RdfQueryRepetition.oneHop)
     {
       // Native direct inverse compares IDs without dereferencing non-Refs.
       properties := plan.traversal.propertyIris.map |p->Str| { iriToken(p) }.join(" ")
@@ -262,6 +272,23 @@ internal class RdfQueryInputShaclCompiler
 
   Str compile(Str subjectIri)
   {
+    source := RdfQuerySparqlCompiler.iriToken(subjectIri)
+    entity := RdfQuerySparqlCompiler.iriToken(plan.entityClassIri)
+    startingRecord := "@prefix sh: <http://www.w3.org/ns/shacl#> .\n" +
+      "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n" +
+      "[] a sh:NodeShape ; sh:targetNode $source ; sh:nodeKind sh:IRI ;\n" +
+      "sh:property [ sh:path rdf:type ; sh:hasValue $entity ]\n"
+    switch (plan.traversal.step)
+    {
+      case RdfQueryStep.identity: return startingRecord + ".\n"
+      case RdfQueryStep.reference:
+      case RdfQueryStep.specReference: return startingRecord + referenceChecks(entity)
+      default: throw UnsupportedErr("Unsupported query step")
+    }
+  }
+
+  private Str referenceChecks(Str entity)
+  {
     properties := plan.traversal.propertyIris.map |p->Str| { RdfQuerySparqlCompiler.iriToken(p) }
     paths := properties.join(" ")
     path := properties.size == 1 ? properties.first : "[ sh:alternativePath ( $paths ) ]"
@@ -287,8 +314,6 @@ internal class RdfQueryInputShaclCompiler
         traversal = "sh:property [ sh:path [ sh:zeroOrMorePath $path ] ; sh:node [ $traversal ] ]"
       default: throw UnsupportedErr("Unsupported query repetition: ${plan.traversal.repetition}")
     }
-    source := RdfQuerySparqlCompiler.iriToken(subjectIri)
-    entity := RdfQuerySparqlCompiler.iriToken(plan.entityClassIri)
     // Inverse scans all records with the tag, rather than the source's outgoing
     // component. Direct inverse only compares IDs and needs no dereference checks.
     switch (plan.traversal.direction)
@@ -304,10 +329,7 @@ internal class RdfQueryInputShaclCompiler
         }
       default: throw UnsupportedErr("Unsupported query direction")
     }
-    return "@prefix sh: <http://www.w3.org/ns/shacl#> .\n" +
-      "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n" +
-      "[] a sh:NodeShape ; sh:targetNode $source ; sh:nodeKind sh:IRI ;\n" +
-      "sh:property [ sh:path rdf:type ; sh:hasValue $entity ]\n$traversal .\n"
+    return "$traversal .\n"
   }
 
   private RdfQueryPlan plan
