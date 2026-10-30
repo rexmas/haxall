@@ -77,6 +77,31 @@ class RdfTest : AbstractXetoTest
     verifyErr(UnsupportedErr#) { compiler.resolve("Holder.star") }
   }
 
+  Void testSugarQuerySeparatesNominalMembershipFromStructuralFallback()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Base: Dict { required, *hot: Marker, *label: Str }
+           Sweet: Base <sugar> { hot, label: "default" }
+           Equivalent: Base <sugar> { hot }
+           Either: Sweet | Base
+           Queries: Dict {
+             sweet: Query<of:Sweet, via:"id">
+             either: Query<of:Either, via:"id">
+           }|>)
+    compiler := RdfQueryCompiler(ns, lib)
+    sweet := compiler.compile("Queries.sweet", "urn:source")
+    verify(sweet.plan.resultClassIris.any |p| { p.endsWith("#Equivalent") })
+    verify(sweet.plan.sugar.anchorClassIris.any |p| { p.endsWith("#Base") })
+    verifyEq(sweet.plan.sugar.constraints.size, 1)
+    verifyEq(sweet.plan.sugar.constraints.first.kind, RdfSugarValueKind.presence)
+    verify(sweet.resultShapes.turtleShapes.contains("sh:alternativePath"))
+    verifyFalse(sweet.resultShapes.turtleShapes.contains("sh:target"))
+    // A union uses nominal/computed subtyping, not sugar's record fallback.
+    either := compiler.compile("Queries.either", "urn:source")
+    verifyEq(either.plan.sugar, null)
+  }
+
   Void testStoredSpecReference()
   {
     rdf := exportWithOpts(

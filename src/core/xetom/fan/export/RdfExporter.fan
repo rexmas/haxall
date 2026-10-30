@@ -124,6 +124,7 @@ class RdfExporter : Exporter
       type := pendingResultShapes.removeAt(0)
       if (emitted.containsKey(type.qname)) continue
       emitted[type.qname] = true
+      this.sugarResultConstraints = type.isSugar
       // This document always declares the explicit sys prefix, not a default prefix.
       this.isSys = false
       w(nodeShapeRef(type.qname)).w(" a sh:NodeShape ;").nl
@@ -327,7 +328,15 @@ class RdfExporter : Exporter
     if (x.isCompound && x.isOr)
     {
       w("  sh:or (").nl
-      x.bases.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
+      members := x.bases
+      if (resultConstraints)
+      {
+        libraries := ns.libs.dup
+        if (!libraries.contains(curLib)) libraries.add(curLib)
+        members = libraries.map |lib->Spec[]| { lib.types.list }.flatten.findAll |Spec candidate->Bool|
+          { x.bases.any |member| { candidate.isa(member) } }.sort |Spec a, Spec b->Int| { a.qname <=> b.qname }
+      }
+      members.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
       w("  ) ;").nl
     }
     if (x.meta.has("abstract"))
@@ -390,8 +399,37 @@ class RdfExporter : Exporter
     prop := isSys ? ":hasMarker" : "sys:hasMarker"
     w("  sh:property [").nl
     w("    sh:path ").w(prop).w(" ;").nl
-    w("    sh:hasValue ").qname(slot.qname).w(" ;").nl
+    if (sugarResultConstraints)
+      w("    sh:qualifiedValueShape [ sh:in ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ] ; sh:qualifiedMinCount 1 ;").nl
+    else
+      w("    sh:hasValue ").qname(slot.qname).w(" ;").nl
     w("  ] ;").nl
+  }
+
+  ** Sugar can validate records declared with its anchor or an equivalent sugar.
+  ** Their stored tags use their own property identities, not this shape's owner.
+  private Str[] resultFieldProperties(Str tag)
+  {
+    libraries := Str:Lib[:]
+    ns.libs.each |lib| { libraries[lib.name] = lib }
+    libraries[curLib.name] = curLib
+    properties := Str:Bool[:]
+    libraries.vals.each |lib|
+    {
+      lib.types.each |type|
+      {
+        if (!RdfQueryResultShaclShapes.isRecordType(type)) return
+        slot := type.slot(tag, false)
+        ids := slot == null ? ["${type.qname}.$tag"] : instanceProperties(slot, slot.qname)
+        ids.each |id|
+        {
+          sep := id.index("::")
+          owner := libraries[id[0..<sep]]
+          properties["<${libUri(owner)}#${id[sep+2..-1]}>"] = true
+        }
+      }
+    }
+    return properties.keys.sort
   }
 
   private Void propShape(Spec slot)
@@ -493,6 +531,8 @@ class RdfExporter : Exporter
     w("    sh:path ")
     if (slot.isQuery) queryPath(slot)
     else if (slot.name == "spec") qname("sys::spec")
+    else if (sugarResultConstraints)
+      w("[ sh:alternativePath ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ]")
     else qname(slot.qname)
     w(" ;").nl
     sh.each |v, n| { w("    sh:").w(n).w(" ").w(v).w(" ;").nl }
@@ -1789,24 +1829,30 @@ class RdfExporter : Exporter
   ** Quoted string literal
   private This literal(Str s)
   {
-    wc('"')
+    return w(stringLiteral(s))
+  }
+
+  ** Turtle and SPARQL share the same quoted-string escapes.
+  internal static Str stringLiteral(Str s)
+  {
+    out := StrBuf().addChar('"')
     s.each |char|
     {
       switch (char)
       {
-        case '\b': w("\\b")
-        case '\f': w("\\f")
-        case '\n': w("\\n")
-        case '\r': w("\\r")
-        case '\t': w("\\t")
-        case '\\': w("\\\\")
-        case '"':  w("\\\"")
+        case '\b': out.add("\\b")
+        case '\f': out.add("\\f")
+        case '\n': out.add("\\n")
+        case '\r': out.add("\\r")
+        case '\t': out.add("\\t")
+        case '\\': out.add("\\\\")
+        case '"':  out.add("\\\"")
         default:
-          if (char <= 0x1f || char == 0x7f) w("\\u").w(char.toHex(4).upper)
-          else wc(char)
+          if (char <= 0x1f || char == 0x7f) out.add("\\u").add(char.toHex(4).upper)
+          else out.addChar(char)
       }
     }
-    return wc('"')
+    return out.addChar('"').toStr
   }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1815,6 +1861,7 @@ class RdfExporter : Exporter
 
   private Bool isSys
   private Bool resultConstraints
+  private Bool sugarResultConstraints
   private Spec[] pendingResultShapes := Spec[,]
   private static const Regex queryPathRef := Regex<|(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*::[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)|>
 }

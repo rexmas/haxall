@@ -97,6 +97,9 @@ class JsonExporter : Exporter
     effective := this.isEffective && depth <= 1
     tags := effective ? spec.meta : spec.metaOwn
     if (spec.isGlobal && tags.missing("global")) prop("global").val(Marker.val).propEnd
+    // Global-derived defaults can inherit the maybe flag without a metadata
+    // tag. Effective consumers need the resolved cardinality, not just tags.
+    if (effective && spec.isMaybe && tags.missing("maybe")) prop("maybe").val(Marker.val).propEnd
     meta(tags)
     slots(useEffectiveSlots(spec, depth) ? spec.slots : spec.slotsOwn, depth)
     globals(spec.globalsOwn, depth)
