@@ -258,6 +258,31 @@ class RdfTest : AbstractXetoTest
     }
   }
 
+  Void testQueryBodyArtifactsKeepRequirementCountsSeparateFromSelection()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Target: Dict { hit }
+           Holder: Dict {
+             next: MultiRef?
+             results: Query<of:Target, via:"next"> {
+               required: Target
+               optional: Target?
+             }
+           }|>)
+    compiler := RdfQueryCompiler(ns, lib)
+    artifacts := compiler.compileBodyValidation("Holder.results", "urn:source")
+    verifyEq(artifacts.querySlot, "${lib.name}::Holder.results")
+    verifyEq(artifacts.requirementNameByIri.vals.sort, ["optional", "required"])
+    verify(artifacts.constructSparql.startsWith("CONSTRUCT"))
+    verify(artifacts.constructSparql.contains("?claim"))
+    verify(artifacts.inputShapes.contains("sh:targetNode <urn:source>"))
+    verify(artifacts.bodyShapes.contains("sh:minCount 0 ; sh:maxCount 1"))
+    verify(artifacts.bodyShapes.contains("sh:minCount 1 ; sh:maxCount 1"))
+    verifyFalse(artifacts.bodyShapes.contains("Target.hit"))
+    verifyErr(UnsupportedErr#) { compiler.compile("Holder.results", "urn:source") }
+  }
+
   Void testRdfQueryResultShaclShapes()
   {
     ns := XetoEnv.cur.resolveNamespace(["sys"])
