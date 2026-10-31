@@ -96,11 +96,15 @@ class JsonExporter : Exporter
     else specType(spec).memberBase(spec)
     effective := this.isEffective && depth <= 1
     tags := effective ? spec.meta : spec.metaOwn
+    // Query members otherwise retain own metadata. Their cardinality must be
+    // resolved: an override can inherit maybe or explicitly make it required.
+    queryMember := isEffective && spec.parent != null && spec.parent.isQuery
     if (spec.isGlobal && tags.missing("global")) prop("global").val(Marker.val).propEnd
     // Global-derived defaults can inherit the maybe flag without a metadata
     // tag. Effective consumers need the resolved cardinality, not just tags.
-    if (effective && spec.isMaybe && tags.missing("maybe")) prop("maybe").val(Marker.val).propEnd
-    meta(tags)
+    if (spec.isMaybe && (queryMember || (effective && tags.missing("maybe"))))
+      prop("maybe").val(Marker.val).propEnd
+    meta(tags, queryMember)
     slots(useEffectiveSlots(spec, depth) ? spec.slots : spec.slotsOwn, depth)
     globals(spec.globalsOwn, depth)
     objEnd.propEnd
@@ -163,11 +167,11 @@ class JsonExporter : Exporter
   }
 
   ** Write meta data tags - does not include {}
-  private This meta(Dict meta)
+  private This meta(Dict meta, Bool skipMaybe := false)
   {
     tags := Etc.dictNames(meta)
     tags.moveTo("version", 0)
-    tags.each |n| { dictPair(n, meta[n]) }
+    tags.each |n| { if (!(skipMaybe && n == "maybe")) dictPair(n, meta[n]) }
     return this
   }
 

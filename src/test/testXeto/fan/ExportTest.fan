@@ -197,8 +197,8 @@ class ExportTest : AbstractXetoTest
           "doc":"Marker labels a dict with typing information", "pattern":m, "val":m]),
       ]),
       "globals":Etc.makeDict([
-        "globF": Etc.makeDict(["id":Ref("hx.test.xeto::TestGlobalsB.globF"), "spec":Ref("sys::Spec"), "type":Ref("sys::Str"), "global":m, "doc":"Unicode string of characters", "val":""]),
-        "globG": Etc.makeDict(["id":Ref("hx.test.xeto::TestGlobalsB.globG"), "spec":Ref("sys::Spec"), "type":Ref("sys::Str"), "global":m, "doc":"Unicode string of characters", "val":""]),
+        "globF": Etc.makeDict(["id":Ref("hx.test.xeto::TestGlobalsB.globF"), "spec":Ref("sys::Spec"), "type":Ref("sys::Str"), "global":m, "maybe":m, "doc":"Unicode string of characters", "val":""]),
+        "globG": Etc.makeDict(["id":Ref("hx.test.xeto::TestGlobalsB.globG"), "spec":Ref("sys::Spec"), "type":Ref("sys::Str"), "global":m, "maybe":m, "doc":"Unicode string of characters", "val":""]),
       ])
     ])
   }
@@ -359,6 +359,32 @@ class ExportTest : AbstractXetoTest
     // echo; echo(">>>>"); row.each |v, n| { echo("$n = $v [$v.typeof]") }
     verifyDictEq(row, expect)
     return row
+  }
+
+  Void testEffectiveQueryMemberOptionality()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Target: Dict { *hot: Marker }
+           Optional: Dict { results: Query<of:Target, via:"next"> { wanted: Target? } }
+           Kept: Optional { results: { wanted: { hot } } }
+           Required: Optional { results: { wanted: Target } }
+           RequiredChild: Required { results: { wanted: { hot } } }|>)
+    buf := Buf()
+    JsonExporter(ns, buf.out, Etc.dict1("effective", Marker.val)).start.lib(lib).end
+    doc := (Str:Obj?)JsonInStream(buf.flip.in).readJson
+    exported := (Str:Obj?)doc.getChecked(lib.name)
+    ["Optional":true, "Kept":true, "Required":false, "RequiredChild":false].each |expected, name|
+    {
+      type := (Str:Obj?)exported.getChecked(name)
+      slots := (Str:Obj?)type.getChecked("slots")
+      query := (Str:Obj?)slots.getChecked("results")
+      members := (Str:Obj?)query.getChecked("slots")
+      member := (Str:Obj?)members.getChecked("wanted")
+      verifyEq(lib.spec(name).slot("results").slot("wanted").isMaybe, expected)
+      verifyEq(member["maybe"] == "\u2713", expected)
+      if (!expected) verifyFalse(member.containsKey("maybe"))
+    }
   }
 
   private Str:Obj? jsonExport(Namespace ns, Dict opts)
