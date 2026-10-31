@@ -77,6 +77,35 @@ class RdfTest : AbstractXetoTest
     verifyErr(UnsupportedErr#) { compiler.resolve("Holder.star") }
   }
 
+  Void testInheritedQueryOverridesAndGlobalFieldProperties()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Target: Dict {}
+           Narrow: Target {}
+           Owner: Dict {
+             *next: Ref
+             alternate: Ref?
+             selected: Query<of:Target, via:"next">
+           }
+           Inherited: Owner {}
+           Override: Owner {
+             selected: Query<of:Narrow, via:"alternate+">
+           }|>)
+    compiler := RdfQueryCompiler(ns, lib)
+    inherited := compiler.resolve("Inherited.selected")
+    qualified := compiler.resolve("${lib.name}::Inherited.selected")
+    verifyEq(inherited.querySlot, qualified.querySlot)
+    verifyEq(inherited.resultType, lib.spec("Target"))
+    verifyEq(inherited.traversal.repetition, RdfQueryRepetition.oneHop)
+    verify(inherited.traversal.propertyIris.any |p| { p.endsWith("#Inherited.next") })
+    overridden := compiler.resolve("Override.selected")
+    verifyEq(overridden.resultType, lib.spec("Narrow"))
+    verifyEq(overridden.traversal.tag, "alternate")
+    verifyEq(overridden.traversal.repetition, RdfQueryRepetition.oneOrMore)
+    verify(overridden.traversal.propertyIris.any |p| { p.endsWith("#Owner.alternate") })
+  }
+
   Void testSugarQuerySeparatesNominalMembershipFromStructuralFallback()
   {
     ns := createNamespace(["sys"])
