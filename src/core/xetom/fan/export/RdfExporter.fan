@@ -337,7 +337,7 @@ class RdfExporter : Exporter
       {
         libraries := ns.libs.dup
         if (!libraries.contains(curLib)) libraries.add(curLib)
-        members = libraries.map |lib->Spec[]| { lib.types.list }.flatten.findAll |Spec candidate->Bool|
+        members = RdfQueryCompiler.recordDefinitions(libraries).findAll |Spec candidate->Bool|
           { x.bases.any |member| { candidate.isa(member) } }.sort |Spec a, Spec b->Int| { a.qname <=> b.qname }
       }
       members.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
@@ -494,6 +494,21 @@ class RdfExporter : Exporter
       sh["nodeKind"] = "sh:IRI"
       // A stored spec Ref names a schema type, not a runtime Entity.
       sh["class"] = of == null && slot.name == "spec" ? "rdfs:Class" : qnameToUri(of ?: "sys::Entity")
+      if (of != null)
+      {
+        libraries := ns.libs.dup
+        if (!libraries.contains(curLib)) libraries.add(curLib)
+        target := slot.of
+        members := RdfQueryCompiler.recordDefinitions(libraries).findAll |candidate|
+          { candidate.parent?.isQuery == true && candidate.isa(target) }
+        if (!members.isEmpty)
+        {
+          alternatives := members.map |member->Str| { qnameToUri(member.qname) }.unique.sort
+          alternatives.remove(sh["class"])
+          alternatives.insert(0, sh.remove("class"))
+          sh["or"] = "( " + alternatives.map |uri->Str| { "[ sh:class $uri ]" }.join(" ") + " )"
+        }
+      }
       if (type.isMultiRef) hasMaxCount = false
     }
     else if (type.isEnum)

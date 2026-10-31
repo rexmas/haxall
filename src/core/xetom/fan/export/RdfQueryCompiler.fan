@@ -29,6 +29,11 @@ class RdfQueryCompiler
   ** Resolve meaning without producing SPARQL or SHACL.
   RdfQueryPlan resolve(Str querySlot)
   {
+    return resolveDefinition(querySlot, false)
+  }
+
+  private Spec querySpec(Str querySlot)
+  {
     local := querySlot
     queryLib := lib
     querySep := local.index("::")
@@ -41,7 +46,13 @@ class RdfQueryCompiler
     owner := queryLib.spec(local[0..<dot])
     query := RdfExporter.instanceSlot(owner, local[dot+1..-1], libraries.vals)
       ?: throw ArgErr("Unknown Query: $querySlot")
-    if (query.type.qname != "sys::Query" || !query.slots.list.isEmpty)
+    return query
+  }
+
+  private RdfQueryPlan resolveDefinition(Str querySlot, Bool allowBody)
+  {
+    query := querySpec(querySlot)
+    if (query.type.qname != "sys::Query" || (!allowBody && !query.slots.list.isEmpty))
       throw UnsupportedErr("Expected a Query without a named body: $querySlot")
     via := query.meta["via"] as Str
     inverse := query.meta["inverse"] as Str
@@ -74,17 +85,16 @@ class RdfQueryCompiler
     properties := Str:Bool[:]
     if (step == RdfQueryStep.specReference) properties[iri("sys::spec")] = true
     classes := Str:Bool[:]
-    libraries.vals.each |library|
+    // A record may declare a Query member as its type even when the requested
+    // Query has no body. Body acceptance and result-type membership are separate.
+    recordDefinitions(libraries.vals).each |spec|
     {
-      library.types.list.each |spec|
+      if (RdfQueryResultShaclShapes.isRecordType(spec) && step == RdfQueryStep.reference)
       {
-        if (RdfQueryResultShaclShapes.isRecordType(spec) && step == RdfQueryStep.reference)
-        {
-          ids := RdfExporter.instancePropertiesForTag(spec, tag, libraries.vals)
-          ids.each |id| { properties[iri(id)] = true }
-        }
-        if (spec.isa(target)) classes[iri(spec.qname)] = true
+        ids := RdfExporter.instancePropertiesForTag(spec, tag, libraries.vals)
+        ids.each |id| { properties[iri(id)] = true }
       }
+      if (spec.isa(target)) classes[iri(spec.qname)] = true
     }
     traversal := RdfReferenceTraversal(tag, properties.keys.sort, repetition, direction, step)
     sugar := target.isSugar ? resolveSugar(target) : null
@@ -96,19 +106,16 @@ class RdfQueryCompiler
   {
     sugar := target.sugar
     anchors := Str[,]
-    libraries.vals.each |library| { library.types.each |s| { if (s.isa(sugar.anchor)) anchors.add(iri(s.qname)) } }
+    recordDefinitions(libraries.vals).each |s| { if (s.isa(sugar.anchor)) anchors.add(iri(s.qname)) }
     constraints := RdfSugarConstraint[,]
     sugar.constraints.each |slot, name|
     {
       properties := Str:Bool[:]
-      libraries.vals.each |library|
+      recordDefinitions(libraries.vals).each |s|
       {
-        library.types.each |s|
-        {
-          if (!RdfQueryResultShaclShapes.isRecordType(s)) return
-          ids := RdfExporter.instancePropertiesForTag(s, name, libraries.vals)
-          ids.each |id| { properties[iri(id)] = true }
-        }
+        if (!RdfQueryResultShaclShapes.isRecordType(s)) return
+        ids := RdfExporter.instancePropertiesForTag(s, name, libraries.vals)
+        ids.each |id| { properties[iri(id)] = true }
       }
       value := slot.meta["val"]
       kind := RdfSugarValueKind.presence
@@ -144,6 +151,95 @@ class RdfQueryCompiler
       RdfQueryResultShaclShapes.compile(ns, plan.resultType))
   }
 
+  ** Compile independent requirement matches and SHACL cardinality. The temporary
+  ** graph is validation evidence, not stored data or queryNamed assignments.
+  RdfQueryBodyValidationArtifacts compileBodyValidation(Str querySlot, Str subjectIri)
+  {
+    query := querySpec(querySlot)
+    original := resolveDefinition(querySlot, true)
+    plan := planForTarget(original, original.resultType)
+    extent := RdfQuerySparqlCompiler(plan).compile(subjectIri)
+    claimExtent := RdfQuerySparqlCompiler(plan).compile(subjectIri, "?claim")
+    definitions := recordDefinitions(libraries.vals)
+    keys := Str:Str[:]
+    anchors := Str:Str[][:]
+    query.slots.each |member, key| { keys[member.qname] = key; anchors[key] = Str[,] }
+    definitions.each |candidate|
+    {
+      for (Spec? s := candidate; s != null; s = s.base)
+      {
+        key := keys[s.qname]
+        if (key == null) continue
+        anchors[key].add(iri(candidate.qname))
+        break
+      }
+    }
+    all := Str[,]
+    anchors.each |values| { all.addAll(values) }
+    anyAnchor := anchorFilter(all)
+    subject := RdfQuerySparqlCompiler.iriToken(subjectIri)
+    branches := Str[,]
+    shapes := StrBuf().add("@prefix sh: <http://www.w3.org/ns/shacl#> .\n")
+    names := Str:Str[:]
+    query.slots.each |member, key|
+    {
+      matching := RdfQuerySparqlCompiler(planForTarget(plan, member)).renderResultMatch
+      anchor := anchorFilter(anchors[key])
+      claimAnchor := anchorFilter(anchors[key], "?claim")
+      claim := "SELECT ?claim WHERE { { $claimExtent } FILTER($claimAnchor) }"
+      predicateIri := iri("${query.qname}.$key")
+      predicate := RdfQuerySparqlCompiler.iriToken(predicateIri)
+      branches.add("{ { $extent } FILTER($anchor) BIND($predicate AS ?requirement) }")
+      branches.add("{ { $extent } FILTER(!($anyAnchor)) $matching FILTER NOT EXISTS { { $claim } } BIND($predicate AS ?requirement) }")
+      min := member.isMaybe ? 0 : 1
+      shapes.add("[] a sh:NodeShape ; sh:targetNode $subject ; sh:property [ sh:path $predicate ; sh:minCount $min ; sh:maxCount 1 ] .\n")
+      names[predicateIri] = key
+    }
+    matches := branches.isEmpty ? "FILTER(false)" : branches.join(" UNION\n")
+    return RdfQueryBodyValidationArtifacts(plan.querySlot,
+      "CONSTRUCT { $subject ?requirement ?result } WHERE { $matches }",
+      RdfQueryInputShaclCompiler(plan).compile(subjectIri), shapes.toStr, names)
+  }
+
+  private RdfQueryPlan planForTarget(RdfQueryPlan original, Spec target)
+  {
+    if (!RdfQueryResultShaclShapes.isRecordType(target))
+      throw UnsupportedErr("Query requirement must be a record type: $target.qname")
+    classes := recordDefinitions(libraries.vals).findAll |s| { s.isa(target) }.map |s->Str| { iri(s.qname) }
+    return RdfQueryPlan(original.querySlot, target, original.traversal, classes,
+      original.entityClassIri, original.markerPredicateIri, original.hasRefFieldPredicateIri,
+      target.isSugar ? resolveSugar(target) : null)
+  }
+
+  ** Record type identities shared by selection and returned-record constraints.
+  internal static Spec[] recordDefinitions(Lib[] libraries)
+  {
+    definitions := Str:Spec[:]
+    libraries.each |library|
+    {
+      library.types.each |type| { definitions[type.qname] = type }
+      // Contributions are not record types, but their Query members are valid
+      // declared record types and must participate in selection and claims.
+      library.types.list.dup.addAll(library.mixins.list).each |Spec type|
+      {
+        type.slots.each |slot|
+        {
+          if (!slot.isQuery) return
+          slot.slots.each |member| { definitions[member.qname] = member }
+        }
+      }
+    }
+    return definitions.vals
+  }
+
+  private Str anchorFilter(Str[] classes, Str resultVar := "?result")
+  {
+    if (classes.isEmpty) return "false"
+    values := classes.map |s->Str| { RdfQuerySparqlCompiler.iriToken(s) }.join(" ")
+    predicate := RdfQuerySparqlCompiler.iriToken(iri("sys::spec"))
+    return "EXISTS { $resultVar $predicate ?declaredSpec . VALUES ?declaredSpec { $values } }"
+  }
+
   private Str iri(Str qname)
   {
     sep := qname.index("::") ?: throw ArgErr("Expected qualified name: $qname")
@@ -155,6 +251,25 @@ class RdfQueryCompiler
   private Namespace ns
   private Lib lib
   private Str:Lib libraries := [:]
+}
+
+** Portable validation of a Query body's requirement counts.
+const class RdfQueryBodyValidationArtifacts
+{
+  internal new make(Str querySlot, Str constructSparql, Str inputShapes,
+                    Str bodyShapes, Str:Str requirementNameByIri)
+  {
+    this.querySlot = querySlot
+    this.constructSparql = constructSparql
+    this.inputShapes = inputShapes
+    this.bodyShapes = bodyShapes
+    this.requirementNameByIri = requirementNameByIri.toImmutable
+  }
+  const Str querySlot
+  const Str constructSparql
+  const Str inputShapes
+  const Str bodyShapes
+  const Str:Str requirementNameByIri
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -267,46 +382,53 @@ internal class RdfQuerySparqlCompiler
 {
   new make(RdfQueryPlan plan) { this.plan = plan }
 
-  Str compile(Str? subjectIri := null)
+  Str compile(Str? subjectIri := null, Str resultVar := "?result")
   {
-    out := StrBuf().add("SELECT DISTINCT ?result WHERE {\n")
+    out := StrBuf().add("SELECT DISTINCT $resultVar WHERE {\n")
     if (subjectIri != null) out.add("  VALUES ?subject { ${iriToken(subjectIri)} }\n")
     switch (plan.traversal.step)
     {
-      case RdfQueryStep.identity: out.add("  BIND(?subject AS ?result)\n")
+      case RdfQueryStep.identity: out.add("  BIND(?subject AS $resultVar)\n")
       case RdfQueryStep.reference:
       case RdfQueryStep.specReference:
         path := "(" + plan.traversal.propertyIris.map |p->Str| { iriToken(p) }.join("|") + ")"
         path = directionPrefix + path
         path += repetitionSuffix(plan.traversal.repetition)
-        out.add("  ?subject $path ?result .\n")
+        out.add("  ?subject $path $resultVar .\n")
       default: throw UnsupportedErr("Unsupported query step")
     }
-    classes := plan.resultClassIris.map |p->Str| { iriToken(p) }.join(" ")
-    out.add("  ?result a ${iriToken(plan.entityClassIri)} .\n")
-    out.add("  FILTER(isIRI(?result))\n")
+    out.add("  $resultVar a ${iriToken(plan.entityClassIri)} .\n")
+    out.add("  FILTER(isIRI($resultVar))\n")
     if (plan.traversal.step != RdfQueryStep.identity && plan.traversal.direction == RdfQueryDirection.inverse && plan.traversal.repetition == RdfQueryRepetition.oneHop)
     {
       // Native direct inverse compares IDs without dereferencing non-Refs.
       properties := plan.traversal.propertyIris.map |p->Str| { iriToken(p) }.join(" ")
-      out.add("  FILTER EXISTS { VALUES ?referenceProperty { $properties } ?result ${iriToken(plan.hasRefFieldPredicateIri)} ?referenceProperty ; ?referenceProperty ?subject . }\n")
+      out.add("  FILTER EXISTS { VALUES ?referenceProperty { $properties } $resultVar ${iriToken(plan.hasRefFieldPredicateIri)} ?referenceProperty ; ?referenceProperty ?subject . }\n")
     }
-    nominal := "EXISTS { ?result a ?resultType . VALUES ?resultType { $classes } }"
+    out.add(renderResultMatch(resultVar))
+    return out.add("}\n").toStr
+  }
+
+  internal Str renderResultMatch(Str resultVar := "?result")
+  {
+    out := StrBuf()
+    classes := plan.resultClassIris.map |p->Str| { iriToken(p) }.join(" ")
+    nominal := "EXISTS { $resultVar a ?resultType . VALUES ?resultType { $classes } }"
     sugar := plan.sugar
     if (sugar == null) out.add("  FILTER($nominal)\n")
     else
     {
       anchors := sugar.anchorClassIris.map |p->Str| { iriToken(p) }.join(" ")
-      predicates := ["EXISTS { ?result a ?resultType . VALUES ?resultType { $anchors } }"]
+      predicates := ["EXISTS { $resultVar a ?resultType . VALUES ?resultType { $anchors } }"]
       sugar.constraints.each |constraint, index|
       {
         properties := constraint.propertyIris.map |p->Str| { iriToken(p) }.join(" ")
         property := "?sugarProperty$index"
         value := "?sugarValue$index"
-        stored := "EXISTS { VALUES $property { $properties } ?result $property $value ."
+        stored := "EXISTS { VALUES $property { $properties } $resultVar $property $value ."
         switch (constraint.kind)
         {
-          case RdfSugarValueKind.presence: predicates.add("($stored } || EXISTS { VALUES $property { $properties } ?result ${iriToken(plan.markerPredicateIri)} $property . } || EXISTS { VALUES $property { $properties } ?result ${iriToken(plan.hasRefFieldPredicateIri)} $property . })")
+          case RdfSugarValueKind.presence: predicates.add("($stored } || EXISTS { VALUES $property { $properties } $resultVar ${iriToken(plan.markerPredicateIri)} $property . } || EXISTS { VALUES $property { $properties } $resultVar ${iriToken(plan.hasRefFieldPredicateIri)} $property . })")
           case RdfSugarValueKind.string: predicates.add("$stored FILTER($value = ${RdfExporter.stringLiteral(constraint.value)}) }")
           case RdfSugarValueKind.boolean: predicates.add("$stored FILTER($value = $constraint.value) }")
           case RdfSugarValueKind.integer: predicates.add("$stored FILTER(datatype($value) IN (<http://www.w3.org/2001/XMLSchema#integer>, <http://www.w3.org/2001/XMLSchema#double>) && $value = $constraint.value) }")
@@ -317,7 +439,7 @@ internal class RdfQuerySparqlCompiler
       structural := predicates.join(" && ")
       out.add("  FILTER($nominal || ($structural))\n")
     }
-    return out.add("}\n").toStr
+    return out.toStr
   }
 
   private Str directionPrefix()
