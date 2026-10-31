@@ -128,8 +128,12 @@ class RdfExporter : Exporter
       // This document always declares the explicit sys prefix, not a default prefix.
       this.isSys = false
       w(nodeShapeRef(type.qname)).w(" a sh:NodeShape ;").nl
-      props := type.slots.list.findAll |Spec s->Bool| { !s.isMarker }
-      markers := type.slots.list.findAll |Spec s->Bool| { s.isMarker }
+      slots := ns.specx(type).slots.list.map |Spec s->Spec|
+      {
+        instanceSlot(type, s.name, ns.libs) ?: s
+      }
+      props := slots.findAll |Spec s->Bool| { !s.isMarker }
+      markers := slots.findAll |Spec s->Bool| { s.isMarker }
       typeConstraints(type, props, markers)
       w(".").nl
     }
@@ -419,8 +423,7 @@ class RdfExporter : Exporter
       lib.types.each |type|
       {
         if (!RdfQueryResultShaclShapes.isRecordType(type)) return
-        slot := type.slot(tag, false)
-        ids := slot == null ? ["${type.qname}.$tag"] : instanceProperties(slot, slot.qname)
+        ids := instancePropertiesForTag(type, tag, libraries.vals)
         ids.each |id|
         {
           sep := id.index("::")
@@ -1370,6 +1373,15 @@ class RdfExporter : Exporter
     return properties.keys.sort
   }
 
+  ** Resolve a runtime tag using the same contributor and global identities as
+  ** instance export. Query paths and reusable sugar shapes use these properties.
+  internal static Str[] instancePropertiesForTag(Spec parent, Str tag, Lib[] libraries)
+  {
+    slot := instanceSlot(parent, tag, libraries)
+    property := slot != null && slot.isSlot ? slot.qname : "${parent.qname}.$tag"
+    return slot == null ? [property] : instanceProperties(slot, property)
+  }
+
   private Str instanceProperty(Spec parent, ReflectMember member)
   {
     spec := instanceMemberSpec(parent, member)
@@ -1391,8 +1403,16 @@ class RdfExporter : Exporter
     ns.libs.each |lib| { libs[lib.name] = lib }
     if (curLib != null) libs[curLib.name] = curLib
 
+    resolved := instanceSlot(parent, member.name, libs.vals) ?: member.spec
+    instanceMemberSpecs[cacheKey] = resolved
+    return resolved
+  }
+
+  ** Recover active mixin declarations before falling back to effective slots.
+  internal static Spec? instanceSlot(Spec parent, Str tag, Lib[] libraries)
+  {
     matches := Str:Spec[:]
-    libs.each |lib|
+    libraries.each |lib|
     {
       lib.mixins.each |contribution|
       {
@@ -1401,11 +1421,11 @@ class RdfExporter : Exporter
           throw UnsupportedErr("Mixin contribution ${contribution.qname} has no target spec")
         if (!parent.isa(target)) return
 
-        slot := contribution.slotOwn(member.name, false)
+        slot := contribution.slotOwn(tag, false)
         if (slot == null) return
         previous := matches[slot.qname]
         if (previous != null && previous !== slot)
-          throw UnsupportedErr("Ambiguous mixin property for ${parent.qname}.${member.name}: ${slot.qname}")
+          throw UnsupportedErr("Ambiguous mixin property for ${parent.qname}.${tag}: ${slot.qname}")
         matches[slot.qname] = slot
       }
     }
@@ -1413,11 +1433,9 @@ class RdfExporter : Exporter
     if (matches.size > 1)
     {
       names := matches.keys.sort.join(", ")
-      throw UnsupportedErr("Ambiguous mixin property for ${parent.qname}.${member.name}: ${names}")
+      throw UnsupportedErr("Ambiguous mixin property for ${parent.qname}.${tag}: ${names}")
     }
-    resolved := matches.vals.first ?: member.spec
-    instanceMemberSpecs[cacheKey] = resolved
-    return resolved
+    return matches.vals.first ?: parent.slot(tag, false)
   }
 
   private Void instanceMember(Str property, Spec type, Obj val, Str indent)

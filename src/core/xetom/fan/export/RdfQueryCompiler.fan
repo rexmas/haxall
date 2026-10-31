@@ -30,16 +30,17 @@ class RdfQueryCompiler
   RdfQueryPlan resolve(Str querySlot)
   {
     local := querySlot
-    prefix := "${lib.name}::"
-    if (local.startsWith(prefix)) local = local[prefix.size..-1]
-    dot := local.indexr(".") ?: throw ArgErr("Expected Owner.query: $querySlot")
-    owner := lib.spec(local[0..<dot])
-    query := owner.slot(local[dot+1..-1])
-    libraries.vals.each |library|
+    queryLib := lib
+    querySep := local.index("::")
+    if (querySep != null)
     {
-      if (library.name == "sys") return
-      if (!library.mixins.list.isEmpty) throw UnsupportedErr("Query compilation does not support mixins")
+      queryLib = libraries[local[0..<querySep]] ?: throw ArgErr("Unknown Query library: $querySlot")
+      local = local[querySep+2..-1]
     }
+    dot := local.indexr(".") ?: throw ArgErr("Expected Owner.query: $querySlot")
+    owner := queryLib.spec(local[0..<dot])
+    query := RdfExporter.instanceSlot(owner, local[dot+1..-1], libraries.vals)
+      ?: throw ArgErr("Unknown Query: $querySlot")
     if (query.type.qname != "sys::Query" || !query.slots.list.isEmpty)
       throw UnsupportedErr("Expected a Query without a named body: $querySlot")
     via := query.meta["via"] as Str
@@ -79,9 +80,7 @@ class RdfQueryCompiler
       {
         if (RdfQueryResultShaclShapes.isRecordType(spec) && step == RdfQueryStep.reference)
         {
-          slot := spec.slot(tag, false)
-          // An undeclared runtime tag exports under its owning record's type.
-          ids := slot == null ? ["${spec.qname}.${tag}"] : RdfExporter.instanceProperties(slot, slot.qname)
+          ids := RdfExporter.instancePropertiesForTag(spec, tag, libraries.vals)
           ids.each |id| { properties[iri(id)] = true }
         }
         if (spec.isa(target)) classes[iri(spec.qname)] = true
@@ -107,8 +106,7 @@ class RdfQueryCompiler
         library.types.each |s|
         {
           if (!RdfQueryResultShaclShapes.isRecordType(s)) return
-          declared := s.slot(name, false)
-          ids := declared == null ? ["${s.qname}.$name"] : RdfExporter.instanceProperties(declared, declared.qname)
+          ids := RdfExporter.instancePropertiesForTag(s, name, libraries.vals)
           ids.each |id| { properties[iri(id)] = true }
         }
       }
