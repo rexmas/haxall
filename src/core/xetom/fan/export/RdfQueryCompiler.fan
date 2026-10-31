@@ -308,11 +308,11 @@ internal class RdfQuerySparqlCompiler
         stored := "EXISTS { VALUES $property { $properties } ?result $property $value ."
         switch (constraint.kind)
         {
-          case RdfSugarValueKind.presence: predicates.add("($stored } || EXISTS { VALUES $property { $properties } ?result ${iriToken(plan.markerPredicateIri)} $property . })")
+          case RdfSugarValueKind.presence: predicates.add("($stored } || EXISTS { VALUES $property { $properties } ?result ${iriToken(plan.markerPredicateIri)} $property . } || EXISTS { VALUES $property { $properties } ?result ${iriToken(plan.hasRefFieldPredicateIri)} $property . })")
           case RdfSugarValueKind.string: predicates.add("$stored FILTER($value = ${RdfExporter.stringLiteral(constraint.value)}) }")
           case RdfSugarValueKind.boolean: predicates.add("$stored FILTER($value = $constraint.value) }")
-          case RdfSugarValueKind.integer:
-          case RdfSugarValueKind.number: predicates.add("$stored FILTER(isNumeric($value) && $value = $constraint.value) }")
+          case RdfSugarValueKind.integer: predicates.add("$stored FILTER(datatype($value) IN (<http://www.w3.org/2001/XMLSchema#integer>, <http://www.w3.org/2001/XMLSchema#double>) && $value = $constraint.value) }")
+          case RdfSugarValueKind.number: predicates.add("$stored FILTER(datatype($value) = <http://www.w3.org/2001/XMLSchema#double> && $value = $constraint.value) }")
           default: throw UnsupportedErr("Unsupported sugar constraint: $constraint.kind")
         }
       }
