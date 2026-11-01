@@ -330,7 +330,7 @@ class RdfTest : AbstractXetoTest
     verifyEq(countMatches(rdf, "temp:Person.dis\n  a rdf:Property ;"), 1)
   }
 
-  Void testAbstractSpecRejectsDirectType()
+  Void testAbstractSpecValidatesFieldsWithoutRejectingDirectType()
   {
     rdf := export(
       Str<|AbstractThing : Dict <abstract> {
@@ -341,8 +341,9 @@ class RdfTest : AbstractXetoTest
 
     abstractRdf := rdf[rdf.index("temp:AbstractThing\n")..<rdf.index("temp:ConcreteThing\n")]
     verify(abstractRdf.contains("a sh:NodeShape ;"), abstractRdf)
-    verify(abstractRdf.contains("sh:path rdf:type ;"), abstractRdf)
-    verify(abstractRdf.contains("sh:hasValue temp:AbstractThing"), abstractRdf)
+    verify(abstractRdf.contains("sh:path temp:AbstractThing.dis"), abstractRdf)
+    verify(abstractRdf.contains("sh:minCount 1"), abstractRdf)
+    verifyFalse(abstractRdf.contains("sh:not"), abstractRdf)
 
     concrete := rdf[rdf.index("temp:ConcreteThing\n")..-1]
     verifyFalse(concrete.contains("sh:hasValue temp:ConcreteThing"), concrete)

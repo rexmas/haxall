@@ -254,9 +254,8 @@ class RdfExporter : Exporter
       if (s.isMarker) markers.add(s)
       else props.add(s)
     }
-    isAbstract := x.meta.has("abstract")
     hasShape := !x.isEnum &&
-                (isAbstract || (x.isCompound && x.isOr) || !props.isEmpty || markers.any |s| { !s.isMaybe })
+                ((x.isCompound && x.isOr) || !props.isEmpty || markers.any |s| { !s.isMaybe })
 
     qname(x.qname).nl
 
@@ -342,17 +341,6 @@ class RdfExporter : Exporter
       }
       members.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
       w("  ) ;").nl
-    }
-    if (x.meta.has("abstract"))
-    {
-      // Concrete descendants remain valid; reject only an instance whose
-      // rdf:type directly names this abstract spec.
-      w("  sh:not [").nl
-      w("    sh:property [").nl
-      w("      sh:path rdf:type ;").nl
-      w("      sh:hasValue ").qname(x.qname).nl
-      w("    ]").nl
-      w("  ] ;").nl
     }
     props.each |s| { propShape(s) }
     markers.each |s| { if (!s.isMaybe) markerShape(s) }
