@@ -211,6 +211,19 @@ class RdfQueryCompiler
       target.isSugar ? resolveSugar(target) : null)
   }
 
+  ** Membership established by exported nominal subclass paths.
+  ** Union edges point from alternatives to the union, never the reverse.
+  internal static Bool hasNominalClassPath(Spec candidate, Spec target)
+  {
+    if (candidate.qname == target.qname) return true
+    if (candidate.isAnd && candidate.ofs(false) != null &&
+        candidate.ofs.any |base| { hasNominalClassPath(base, target) }) return true
+    if (target.isOr && target.ofs(false) != null &&
+        target.ofs.any |base| { hasNominalClassPath(candidate, base) }) return true
+    if (candidate.isCompound) return false
+    return candidate.base != null && hasNominalClassPath(candidate.base, target)
+  }
+
   ** Record type identities shared by selection and returned-record constraints.
   internal static Spec[] recordDefinitions(Lib[] libraries)
   {

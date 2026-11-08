@@ -63,6 +63,7 @@ class RdfExporter : Exporter
     }
 
     types.each |x| { if (!XetoUtil.isAutoName(x.name)) cls(ns.specx(x)) }
+    queryMemberClasses(lib)
 
     // A mixin contributes to its target's effective shape; it is not an RDF
     // class of its own. Emit each affected target once with all namespace
@@ -103,10 +104,30 @@ class RdfExporter : Exporter
 
   override This spec(Spec spec)
   {
-    this.isSys = spec.lib.name == "sys"
-    if (spec.isType) return cls(spec)
+    prepareLibrary(spec.lib)
+    if (spec.isType)
+    {
+      cls(spec)
+      queryMemberClasses(spec.lib)
+      return this
+    }
     if (spec.isGlobal) return global(spec)
     throw UnsupportedErr("RDF export target is neither a type nor a global: ${spec.qname}")
+  }
+
+  ** Member ancestry is vocabulary, not execution of Query-body constraints.
+  private Void queryMemberClasses(Lib lib)
+  {
+    libraries := ns.libs.dup
+    if (!libraries.contains(lib)) libraries.add(lib)
+    RdfQueryCompiler.recordDefinitions(libraries)
+      .findAll |s| { s.parent?.isQuery == true }
+      .sort |a, b| { a.qname <=> b.qname }
+      .each |member|
+      {
+        qname(member.qname).w(" a rdfs:Class ; rdfs:subClassOf ")
+          .qname(member.base.qname).w(" .").nl
+      }
   }
 
   ** Compile only the requested type and nested shape dependencies using the
@@ -406,18 +427,18 @@ class RdfExporter : Exporter
     ns.libs.each |lib| { libraries[lib.name] = lib }
     libraries[curLib.name] = curLib
     properties := Str:Bool[:]
-    libraries.vals.each |lib|
+    // Body members can occur as runtime record types, including when their
+    // stored tag is an undeclared/global value. Use the same definition closure
+    // as selection, rather than omitting members from reusable sugar shapes.
+    RdfQueryCompiler.recordDefinitions(libraries.vals).each |type|
     {
-      lib.types.each |type|
+      if (!RdfQueryResultShaclShapes.isRecordType(type)) return
+      ids := instancePropertiesForTag(type, tag, libraries.vals)
+      ids.each |id|
       {
-        if (!RdfQueryResultShaclShapes.isRecordType(type)) return
-        ids := instancePropertiesForTag(type, tag, libraries.vals)
-        ids.each |id|
-        {
-          sep := id.index("::")
-          owner := libraries[id[0..<sep]]
-          properties["<${libUri(owner)}#${id[sep+2..-1]}>"] = true
-        }
+        sep := id.index("::")
+        owner := libraries[id[0..<sep]]
+        properties["<${libUri(owner)}#${id[sep+2..-1]}>"] = true
       }
     }
     return properties.keys.sort
@@ -488,7 +509,8 @@ class RdfExporter : Exporter
         if (!libraries.contains(curLib)) libraries.add(curLib)
         target := slot.of
         members := RdfQueryCompiler.recordDefinitions(libraries).findAll |candidate|
-          { candidate.parent?.isQuery == true && candidate.isa(target) }
+          { candidate.parent?.isQuery == true && candidate.isa(target) &&
+            !RdfQueryCompiler.hasNominalClassPath(candidate, target) }
         if (!members.isEmpty)
         {
           alternatives := members.map |member->Str| { qnameToUri(member.qname) }.unique.sort
