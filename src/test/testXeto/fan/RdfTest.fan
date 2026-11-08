@@ -106,6 +106,32 @@ class RdfTest : AbstractXetoTest
     verify(overridden.traversal.propertyIris.any |p| { p.endsWith("#Owner.alternate") })
   }
 
+  Void testQueryMemberAncestryAndComputedSugarReferences()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Target: Dict { *hot: Marker, *cold: Marker, *label: Str }
+           Hot: Target <sugar> { hot, label: Str "default" }
+           Owner: Dict { results: Query<of:Target, via:"next"> { wanted: Target { hot } } }
+           Inherited: Owner {}
+           Child: Owner { results: { wanted: { cold } } }
+           NominalLink: Dict { target: Ref<of:Target>, targets: MultiRef<of:Target> }
+           SugarLink: Dict { target: Ref<of:Hot> }|>)
+    ["NominalLink", "SugarLink"].each |name|
+    {
+      buf := Buf()
+      RdfExporter(ns, buf.out, Etc.dict1("schemaOnly", Marker.val)).start.spec(lib.spec(name)).end
+      rdf := buf.flip.readAllStr.replace(lib.name, "temp")
+      verify(rdf.contains("temp:Owner.results.wanted a rdfs:Class ; rdfs:subClassOf temp:Target"), rdf)
+      verify(rdf.contains("temp:Child.results.wanted a rdfs:Class ; rdfs:subClassOf temp:Owner.results.wanted"), rdf)
+      verifyFalse(rdf.contains("temp:Inherited.results.wanted a rdfs:Class"), rdf)
+      verifyFalse(rdf.contains("rdfs:subClassOf temp:Hot"), rdf)
+      verifyEq(rdf.contains("sh:or"), name == "SugarLink", rdf)
+      reusable := RdfQueryResultShaclShapes.compile(ns, lib.spec(name)).turtleShapes
+      verifyEq(reusable.contains("sh:or"), name == "SugarLink", reusable)
+    }
+  }
+
   Void testSugarQuerySeparatesNominalMembershipFromStructuralFallback()
   {
     ns := createNamespace(["sys"])
