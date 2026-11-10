@@ -94,7 +94,7 @@ class RdfQueryCompiler
         ids := RdfExporter.instancePropertiesForTag(spec, tag, libraries.vals)
         ids.each |id| { properties[iri(id)] = true }
       }
-      if (spec.isa(target)) classes[iri(spec.qname)] = true
+      if (spec.fits(target)) classes[iri(spec.qname)] = true
     }
     traversal := RdfReferenceTraversal(tag, properties.keys.sort, repetition, direction, step)
     sugar := target.isSugar ? resolveSugar(target) : null
@@ -205,7 +205,7 @@ class RdfQueryCompiler
   {
     if (!RdfQueryResultShaclShapes.isRecordType(target))
       throw UnsupportedErr("Query requirement must be a record type: $target.qname")
-    classes := recordDefinitions(libraries.vals).findAll |s| { s.isa(target) }.map |s->Str| { iri(s.qname) }
+    classes := recordDefinitions(libraries.vals).findAll |s| { s.fits(target) }.map |s->Str| { iri(s.qname) }
     return RdfQueryPlan(original.querySlot, target, original.traversal, classes,
       original.entityClassIri, original.markerPredicateIri, original.hasRefFieldPredicateIri,
       target.isSugar ? resolveSugar(target) : null)

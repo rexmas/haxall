@@ -358,7 +358,7 @@ class RdfExporter : Exporter
         libraries := ns.libs.dup
         if (!libraries.contains(curLib)) libraries.add(curLib)
         members = RdfQueryCompiler.recordDefinitions(libraries).findAll |Spec candidate->Bool|
-          { x.bases.any |member| { candidate.isa(member) } }.sort |Spec a, Spec b->Int| { a.qname <=> b.qname }
+          { x.bases.any |member| { candidate.fits(member) } }.sort |Spec a, Spec b->Int| { a.qname <=> b.qname }
       }
       members.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
       w("  ) ;").nl
@@ -509,7 +509,7 @@ class RdfExporter : Exporter
         if (!libraries.contains(curLib)) libraries.add(curLib)
         target := slot.of
         members := RdfQueryCompiler.recordDefinitions(libraries).findAll |candidate|
-          { candidate.parent?.isQuery == true && candidate.isa(target) &&
+          { candidate.parent?.isQuery == true && candidate.fits(target) &&
             !RdfQueryCompiler.hasNominalClassPath(candidate, target) }
         if (!members.isEmpty)
         {
