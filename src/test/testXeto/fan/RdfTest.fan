@@ -132,6 +132,29 @@ class RdfTest : AbstractXetoTest
     }
   }
 
+  Void testSugarReferenceFittingDoesNotValidateTargetFields()
+  {
+    ns := createNamespace(["sys"])
+    lib := ns.compileTempLib(
+      Str<|Target: Dict { *hot: Marker, *label: Str }
+           Hot: Target <sugar> { hot, label: Str "default" }
+           Link: Dict { value: Ref<of:Hot>, values: MultiRef<of:Hot> }
+           Nested: Dict { value: Hot }|>)
+    link := RdfQueryResultShaclShapes.compile(ns, lib.spec("Link")).turtleShapes
+    // Fitting accepts anchor records through stored-field/marker/Ref evidence.
+    verify(link.contains("#Target>"), link)
+    verify(link.contains("#hasMarker>"), link)
+    verify(link.contains("#hasRefField>"), link)
+    verify(link.contains("sh:qualifiedMinCount 1"), link)
+    // The defaulted label is a validation requirement, not a fitting predicate.
+    verifyFalse(link.contains(".label>"), link)
+    verifyFalse(link.contains("sh:node <"), link)
+    nested := RdfQueryResultShaclShapes.compile(ns, lib.spec("Nested")).turtleShapes
+    verify(nested.contains("sh:node <"), nested)
+    verify(nested.contains("#Target.label>"), nested)
+    verify(nested.contains("#Hot.label>"), nested)
+  }
+
   Void testSugarQuerySeparatesNominalMembershipFromStructuralFallback()
   {
     ns := createNamespace(["sys"])

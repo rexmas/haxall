@@ -145,7 +145,7 @@ class RdfExporter : Exporter
       type := pendingResultShapes.removeAt(0)
       if (emitted.containsKey(type.qname)) continue
       emitted[type.qname] = true
-      this.sugarResultConstraints = type.isSugar
+      this.sugarFieldConstraints = type.isSugar
       // This document always declares the explicit sys prefix, not a default prefix.
       this.isSys = false
       w(nodeShapeRef(type.qname)).w(" a sh:NodeShape ;").nl
@@ -349,6 +349,8 @@ class RdfExporter : Exporter
   ** Shared constraints for schema export and query-result conformance.
   private Void typeConstraints(Spec x, Spec[] props, Spec[] markers)
   {
+    previousSugar := sugarFieldConstraints
+    sugarFieldConstraints = x.isSugar
     if (x.isCompound && x.isOr)
     {
       w("  sh:or (").nl
@@ -365,6 +367,7 @@ class RdfExporter : Exporter
     }
     props.each |s| { propShape(s) }
     markers.each |s| { if (!s.isMaybe) markerShape(s) }
+    sugarFieldConstraints = previousSugar
   }
 
   ** Emit only this library's contribution to a dependency-owned target. The
@@ -412,7 +415,7 @@ class RdfExporter : Exporter
     prop := isSys ? ":hasMarker" : "sys:hasMarker"
     w("  sh:property [").nl
     w("    sh:path ").w(prop).w(" ;").nl
-    if (sugarResultConstraints)
+    if (sugarFieldConstraints)
       w("    sh:qualifiedValueShape [ sh:in ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ] ; sh:qualifiedMinCount 1 ;").nl
     else
       w("    sh:hasValue ").qname(slot.qname).w(" ;").nl
@@ -470,6 +473,7 @@ class RdfExporter : Exporter
     // build constraints
     sh := Str:Obj[:]
     sh.ordered = true
+    fitting := null as Str
     hasMinCount := !slot.isMaybe
     hasMaxCount := true
 
@@ -503,7 +507,12 @@ class RdfExporter : Exporter
       sh["nodeKind"] = "sh:IRI"
       // A stored spec Ref names a schema type, not a runtime Entity.
       sh["class"] = of == null && slot.name == "spec" ? "rdfs:Class" : qnameToUri(of ?: "sys::Entity")
-      if (of != null)
+      if (of != null && slot.of.isSugar)
+      {
+        sh.remove("class")
+        fitting = RdfQueryCompiler(ns, curLib).fittingShape(slot.of)
+      }
+      else if (of != null)
       {
         libraries := ns.libs.dup
         if (!libraries.contains(curLib)) libraries.add(curLib)
@@ -540,6 +549,11 @@ class RdfExporter : Exporter
     else if (type.isDict)
     {
       sh["node"] = nodeShapeRef(type.qname)
+      if (type.isSugar)
+      {
+        predicate := RdfQueryCompiler(ns, curLib).fittingShape(type)
+        fitting = "sh:or ( [ sh:property [ sh:path sys:spec ; sh:maxCount 0 ] ] [ $predicate ] )"
+      }
     }
     else if (type.qname == "sys::Obj")
     {
@@ -559,11 +573,12 @@ class RdfExporter : Exporter
     w("    sh:path ")
     if (slot.isQuery) queryPath(slot)
     else if (slot.name == "spec") qname("sys::spec")
-    else if (sugarResultConstraints)
+    else if (sugarFieldConstraints)
       w("[ sh:alternativePath ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ]")
     else qname(slot.qname)
     w(" ;").nl
     sh.each |v, n| { w("    sh:").w(n).w(" ").w(v).w(" ;").nl }
+    if (fitting != null) w("    ").w(fitting).w(" ;").nl
     if (type.isEnum && type.qname != "sys::Unit" &&
         type.qname != "sys::TimeZone")
       enumConstraint(type)
@@ -1904,7 +1919,7 @@ class RdfExporter : Exporter
 
   private Bool isSys
   private Bool resultConstraints
-  private Bool sugarResultConstraints
+  private Bool sugarFieldConstraints
   private Spec[] pendingResultShapes := Spec[,]
   private static const Regex queryPathRef := Regex<|(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*::[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)|>
 }

@@ -102,6 +102,52 @@ class RdfQueryCompiler
       iri("sys::Entity"), iri("sys::hasMarker"), iri("sys::hasRefField"), sugar)
   }
 
+  ** SHACL Core fitting predicate; this does not validate the target's fields.
+  internal Str fittingShape(Spec target)
+  {
+    classes := recordDefinitions(libraries.vals).findAll |s| { s.fits(target) }.map |s->Str| { iri(s.qname) }
+    nominal := fittingClasses(classes)
+    if (!target.isSugar) return nominal
+    sugar := resolveSugar(target)
+    structural := [fittingClasses(sugar.anchorClassIris)]
+    sugar.constraints.each |constraint|
+    {
+      properties := constraint.propertyIris.map |p->Str| { RdfQuerySparqlCompiler.iriToken(p) }
+      if (properties.isEmpty) { structural.add("sh:in ()"); return }
+      propertyList := properties.join(" ")
+      path := properties.size == 1 ? properties.first : "[ sh:alternativePath ( $propertyList ) ]"
+      switch (constraint.kind)
+      {
+        case RdfSugarValueKind.presence:
+          alternatives := ["[ sh:property [ sh:path $path ; sh:minCount 1 ] ]"]
+          ["sys::hasMarker", "sys::hasRefField"].each |tag|
+          {
+            evidence := RdfQuerySparqlCompiler.iriToken(iri(tag))
+            alternatives.add("[ sh:property [ sh:path $evidence ; sh:qualifiedValueShape [ sh:in ( $propertyList ) ] ; sh:qualifiedMinCount 1 ] ]")
+          }
+          structural.add("sh:or ( " + alternatives.join(" ") + " )")
+        case RdfSugarValueKind.string:
+          literal := RdfExporter.stringLiteral(constraint.value)
+          structural.add("sh:property [ sh:path $path ; sh:qualifiedValueShape [ sh:in ( $literal ${literal}^^<http://www.w3.org/2001/XMLSchema#string> ) ] ; sh:qualifiedMinCount 1 ]")
+        case RdfSugarValueKind.boolean:
+          structural.add("sh:property [ sh:path $path ; sh:hasValue $constraint.value ]")
+        case RdfSugarValueKind.integer:
+          structural.add("sh:property [ sh:path $path ; sh:qualifiedValueShape [ sh:or ( [ sh:datatype <http://www.w3.org/2001/XMLSchema#integer> ] [ sh:datatype <http://www.w3.org/2001/XMLSchema#double> ] ) ; sh:minInclusive $constraint.value ; sh:maxInclusive $constraint.value ] ; sh:qualifiedMinCount 1 ]")
+        case RdfSugarValueKind.number:
+          bound := "\"$constraint.value\"^^<http://www.w3.org/2001/XMLSchema#double>"
+          structural.add("sh:property [ sh:path $path ; sh:qualifiedValueShape [ sh:datatype <http://www.w3.org/2001/XMLSchema#double> ; sh:minInclusive $bound ; sh:maxInclusive $bound ] ; sh:qualifiedMinCount 1 ]")
+        default: throw UnsupportedErr("Unsupported sugar value kind")
+      }
+    }
+    return "sh:or ( [ $nominal ] [ " + structural.join(" ; ") + " ] )"
+  }
+
+  private static Str fittingClasses(Str[] classes)
+  {
+    if (classes.isEmpty) return "sh:in ()"
+    return "sh:or ( " + classes.map |c->Str| { "[ sh:class ${RdfQuerySparqlCompiler.iriToken(c)} ]" }.join(" ") + " )"
+  }
+
   private RdfSugarMatch resolveSugar(Spec target)
   {
     sugar := target.sugar
