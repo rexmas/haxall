@@ -145,7 +145,7 @@ class RdfExporter : Exporter
       type := pendingResultShapes.removeAt(0)
       if (emitted.containsKey(type.qname)) continue
       emitted[type.qname] = true
-      this.sugarFieldConstraints = type.isSugar
+      this.fieldConstraintsByTag = type.isSugar
       // This document always declares the explicit sys prefix, not a default prefix.
       this.isSys = false
       w(nodeShapeRef(type.qname)).w(" a sh:NodeShape ;").nl
@@ -349,25 +349,46 @@ class RdfExporter : Exporter
   ** Shared constraints for schema export and query-result conformance.
   private Void typeConstraints(Spec x, Spec[] props, Spec[] markers)
   {
-    previousSugar := sugarFieldConstraints
-    sugarFieldConstraints = x.isSugar
     if (x.isCompound && x.isOr)
     {
-      w("  sh:or (").nl
-      members := x.bases
-      if (resultConstraints)
-      {
-        libraries := ns.libs.dup
-        if (!libraries.contains(curLib)) libraries.add(curLib)
-        members = RdfQueryCompiler.recordDefinitions(libraries).findAll |Spec candidate->Bool|
-          { x.bases.any |member| { candidate.fits(member) } }.sort |Spec a, Spec b->Int| { a.qname <=> b.qname }
-      }
-      members.each |member| { w("    [ sh:class ").qname(member.qname).w(" ]").nl }
-      w("  ) ;").nl
+      w("  sh:nodeKind sh:BlankNodeOrIRI ;").nl
+    }
+    fieldConstraints(x, props, markers)
+  }
+
+  ** Apply the same field contract to type shapes and mixin contributions.
+  private Void fieldConstraints(Spec x, Spec[] props, Spec[] markers)
+  {
+    previousByTag := fieldConstraintsByTag
+    fieldConstraintsByTag = resultConstraints || x.isSugar
+    // Union alternatives are members, but do not inherit the union's fields.
+    // Explicit result validation always applies the requested field contract.
+    guardFields := !resultConstraints && x.isOr &&
+      (!props.isEmpty || markers.any |s| { !s.isMaybe })
+    if (guardFields)
+    {
+      libraries := ns.libs.dup
+      if (!libraries.contains(curLib)) libraries.add(curLib)
+      inheritors := RdfQueryCompiler.recordDefinitions(libraries)
+        .findAll |candidate| { inheritsFieldsFrom(candidate, x) }
+        .sort |a, b| { a.qname <=> b.qname }
+      w("  sh:or ( [ sh:not [ sh:property [ sh:path sys:spec ; sh:in ( ")
+      inheritors.each |type| { qname(type.qname).w(" ") }
+      w(") ; sh:minCount 1 ] ] ] [").nl
     }
     props.each |s| { propShape(s) }
     markers.each |s| { if (!s.isMaybe) markerShape(s) }
-    sugarFieldConstraints = previousSugar
+    if (guardFields) w("  ] ) ;").nl
+    fieldConstraintsByTag = previousByTag
+  }
+
+  ** Field inheritance excludes membership through a union's alternatives.
+  private static Bool inheritsFieldsFrom(Spec candidate, Spec target)
+  {
+    if (candidate.qname == target.qname) return true
+    if (candidate.isAnd && candidate.ofs(false) != null &&
+        candidate.ofs.any |base| { inheritsFieldsFrom(base, target) }) return true
+    return candidate.base != null && inheritsFieldsFrom(candidate.base, target)
   }
 
   ** Emit only this library's contribution to a dependency-owned target. The
@@ -392,8 +413,7 @@ class RdfExporter : Exporter
       w("  a sh:NodeShape ;").nl
       markers.each |slot| { hasMarker(slot) }
       w("  sh:targetClass ").qname(target.qname).w(" ;").nl
-      props.each |slot| { propShape(slot) }
-      markers.each |slot| { if (!slot.isMaybe) markerShape(slot) }
+      fieldConstraints(target, props, markers)
       w(".").nl
     }
 
@@ -415,7 +435,7 @@ class RdfExporter : Exporter
     prop := isSys ? ":hasMarker" : "sys:hasMarker"
     w("  sh:property [").nl
     w("    sh:path ").w(prop).w(" ;").nl
-    if (sugarFieldConstraints)
+    if (fieldConstraintsByTag)
       w("    sh:qualifiedValueShape [ sh:in ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ] ; sh:qualifiedMinCount 1 ;").nl
     else
       w("    sh:hasValue ").qname(slot.qname).w(" ;").nl
@@ -573,7 +593,7 @@ class RdfExporter : Exporter
     w("    sh:path ")
     if (slot.isQuery) queryPath(slot)
     else if (slot.name == "spec") qname("sys::spec")
-    else if (sugarFieldConstraints)
+    else if (fieldConstraintsByTag)
       w("[ sh:alternativePath ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ]")
     else qname(slot.qname)
     w(" ;").nl
@@ -1919,7 +1939,7 @@ class RdfExporter : Exporter
 
   private Bool isSys
   private Bool resultConstraints
-  private Bool sugarFieldConstraints
+  private Bool fieldConstraintsByTag
   private Spec[] pendingResultShapes := Spec[,]
   private static const Regex queryPathRef := Regex<|(?:[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*::[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)|>
 }
