@@ -85,7 +85,20 @@ const class RdfQudtMap
     }
     this.unmapped = unmapped.toImmutable
     this.units = units.toImmutable
+    groups := Str:Str[][:]
+    byQuantity := UnitQuantity:Str:Str[:]
+    units.each |target, name|
+    {
+      quantity := UnitQuantity.unitToQuantity[Unit.fromStr(name)]
+      prefix := quantity == UnitQuantity.currency ? "currency" : "unit"
+      iri := "${prefix}:${target}"
+      groups.getOrAdd(iri) { Str[,] }.add(name)
+      byQuantity.getOrAdd(quantity) { Str:Str[:] }[name] = iri
+    }
+    this.ambiguousUnitNames = groups.findAll |names| { names.size > 1 }
+      .map |names->Str[]| { names.sort.toImmutable }.toImmutable
     this.quantities = quantities.toImmutable
+    this.unitsByQuantity = byQuantity.toImmutable
   }
 
   ** Map a runtime unit, resolved from any accepted name or symbol, to QUDT.
@@ -115,6 +128,8 @@ const class RdfQudtMap
     throw UnsupportedErr("No reviewed QUDT classification for Xeto quantity '${quantity.name}'")
   }
 
+  const Str:Str[] ambiguousUnitNames
+  const UnitQuantity:Str:Str unitsByQuantity
   private const Str:Str unmapped
   private const Str:Str units
   private const Str:Str[] quantities

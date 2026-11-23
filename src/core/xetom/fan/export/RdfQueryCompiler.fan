@@ -99,7 +99,7 @@ class RdfQueryCompiler
     traversal := RdfReferenceTraversal(tag, properties.keys.sort, repetition, direction, step)
     sugar := target.isSugar ? resolveSugar(target) : null
     return RdfQueryPlan(query.qname, target, traversal, classes.keys.sort,
-      iri("sys::Entity"), iri("sys::hasMarker"), iri("sys::hasRefField"), sugar)
+      RdfExporter.rdfNamespace + "Record", iri("sys::hasMarker"), iri("sys::hasRefField"), sugar)
   }
 
   ** SHACL Core fitting predicate; this does not validate the target's fields.
@@ -253,7 +253,7 @@ class RdfQueryCompiler
       throw UnsupportedErr("Query requirement must be a record type: $target.qname")
     classes := recordDefinitions(libraries.vals).findAll |s| { s.fits(target) }.map |s->Str| { iri(s.qname) }
     return RdfQueryPlan(original.querySlot, target, original.traversal, classes,
-      original.entityClassIri, original.markerPredicateIri, original.hasRefFieldPredicateIri,
+      original.recordClassIri, original.markerPredicateIri, original.hasRefFieldPredicateIri,
       target.isSugar ? resolveSugar(target) : null)
   }
 
@@ -340,14 +340,14 @@ const class RdfQueryBodyValidationArtifacts
 const class RdfQueryPlan
 {
   internal new make(Str querySlot, Spec resultType, RdfReferenceTraversal traversal,
-                    Str[] resultClassIris, Str entityClassIri,
+                    Str[] resultClassIris, Str recordClassIri,
                     Str markerPredicateIri, Str hasRefFieldPredicateIri, RdfSugarMatch? sugar := null)
   {
     this.querySlot = querySlot
     this.resultType = resultType
     this.traversal = traversal
     this.resultClassIris = resultClassIris.toImmutable
-    this.entityClassIri = entityClassIri
+    this.recordClassIri = recordClassIri
     this.markerPredicateIri = markerPredicateIri
     this.hasRefFieldPredicateIri = hasRefFieldPredicateIri
     this.sugar = sugar
@@ -357,7 +357,9 @@ const class RdfQueryPlan
   const Spec resultType
   const RdfReferenceTraversal traversal
   const Str[] resultClassIris
-  const Str entityClassIri
+  const Str recordClassIri
+  ** Record-existence class used by plans compiled before the name changed.
+  @Deprecated Str entityClassIri() { recordClassIri }
   const Str markerPredicateIri
   const Str hasRefFieldPredicateIri
   const RdfSugarMatch? sugar
@@ -456,7 +458,7 @@ internal class RdfQuerySparqlCompiler
         out.add("  ?subject $path $resultVar .\n")
       default: throw UnsupportedErr("Unsupported query step")
     }
-    out.add("  $resultVar a ${iriToken(plan.entityClassIri)} .\n")
+    out.add("  $resultVar a ${iriToken(plan.recordClassIri)} .\n")
     out.add("  FILTER(isIRI($resultVar))\n")
     if (plan.traversal.step != RdfQueryStep.identity && plan.traversal.direction == RdfQueryDirection.inverse && plan.traversal.repetition == RdfQueryRepetition.oneHop)
     {
@@ -545,21 +547,21 @@ internal class RdfQueryInputShaclCompiler
   Str compile(Str subjectIri)
   {
     source := RdfQuerySparqlCompiler.iriToken(subjectIri)
-    entity := RdfQuerySparqlCompiler.iriToken(plan.entityClassIri)
+    recordClass := RdfQuerySparqlCompiler.iriToken(plan.recordClassIri)
     startingRecord := "@prefix sh: <http://www.w3.org/ns/shacl#> .\n" +
       "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n" +
       "[] a sh:NodeShape ; sh:targetNode $source ; sh:nodeKind sh:IRI ;\n" +
-      "sh:property [ sh:path rdf:type ; sh:hasValue $entity ]\n"
+      "sh:property [ sh:path rdf:type ; sh:hasValue $recordClass ]\n"
     switch (plan.traversal.step)
     {
       case RdfQueryStep.identity: return startingRecord + ".\n"
       case RdfQueryStep.reference:
-      case RdfQueryStep.specReference: return startingRecord + referenceChecks(entity)
+      case RdfQueryStep.specReference: return startingRecord + referenceChecks(recordClass)
       default: throw UnsupportedErr("Unsupported query step")
     }
   }
 
-  private Str referenceChecks(Str entity)
+  private Str referenceChecks(Str recordClass)
   {
     properties := plan.traversal.propertyIris.map |p->Str| { RdfQuerySparqlCompiler.iriToken(p) }
     paths := properties.join(" ")
@@ -596,7 +598,7 @@ internal class RdfQueryInputShaclCompiler
         {
           case RdfQueryRepetition.oneHop: traversal = ""
           case RdfQueryRepetition.oneOrMore:
-            traversal = ".\n[] a sh:NodeShape ; sh:targetClass $entity ; ${checks}"
+            traversal = ".\n[] a sh:NodeShape ; sh:targetClass $recordClass ; ${checks}"
           default: throw UnsupportedErr("Unsupported query repetition")
         }
       default: throw UnsupportedErr("Unsupported query direction")

@@ -126,7 +126,7 @@ class RdfTest : AbstractXetoTest
       verify(rdf.contains("temp:Child.results.wanted a rdfs:Class ; rdfs:subClassOf temp:Owner.results.wanted"), rdf)
       verifyFalse(rdf.contains("temp:Inherited.results.wanted a rdfs:Class"), rdf)
       verifyFalse(rdf.contains("rdfs:subClassOf temp:Hot"), rdf)
-      verifyEq(rdf.contains("sh:or"), name == "SugarLink", rdf)
+      verifyEq(propertyShape(rdf, name + ".target").contains("sh:or"), name == "SugarLink", rdf)
       reusable := RdfQueryResultShaclShapes.compile(ns, lib.spec(name)).turtleShapes
       verifyEq(reusable.contains("sh:or"), name == "SugarLink", reusable)
     }
@@ -232,7 +232,7 @@ class RdfTest : AbstractXetoTest
     RdfExporter(ns, buf.out, Etc.dict0).start.runtimeInstances(lib, [untyped, typed]).end
     rdf := buf.flip.readAllStr.replace(lib.name, "temp")
     untypedRdf := instanceBlock(rdf, "untyped")
-    verify(untypedRdf.contains("sys:Entity"), untypedRdf)
+    verify(untypedRdf.contains("xetoRdf:Record"), untypedRdf)
     verifyFalse(untypedRdf.contains("sys:spec"), untypedRdf)
     verifyFalse(untypedRdf.contains("sys:hasRefField"), untypedRdf)
     typedRdf := instanceBlock(rdf, "typed")
@@ -393,7 +393,7 @@ class RdfTest : AbstractXetoTest
     verify(abstractRdf.contains("a sh:NodeShape ;"), abstractRdf)
     verify(abstractRdf.contains("sh:path temp:AbstractThing.dis"), abstractRdf)
     verify(abstractRdf.contains("sh:minCount 1"), abstractRdf)
-    verifyFalse(abstractRdf.contains("sh:not"), abstractRdf)
+    verifyFalse(abstractRdf.contains("sh:hasValue temp:AbstractThing"), abstractRdf)
 
     concrete := rdf[rdf.index("temp:ConcreteThing\n")..-1]
     verifyFalse(concrete.contains("sh:hasValue temp:ConcreteThing"), concrete)
@@ -423,7 +423,9 @@ class RdfTest : AbstractXetoTest
     verify(rdf.contains("sh:path temp:Reading.count ;\n    sh:datatype xsd:integer ;"))
     verify(rdf.contains("sh:minInclusive 1 ;"))
     verify(rdf.contains("sh:maxInclusive 60 ;"))
-    verify(rdf.contains("sh:path temp:Reading.value ;\n    sh:datatype xsd:double ;"))
+    value := rdf[rdf.index("sh:path temp:Reading.value ;")..-1].splitLines
+    verify(value.any |line| { line.contains("sh:or ( [ sh:datatype xsd:double ;") })
+    verify(value.any |line| { line.contains("sh:class qudt:QuantityValue ;") })
     verify(rdf.contains("sh:path temp:Reading.enabled ;\n    sh:datatype xsd:boolean ;"))
     verify(rdf.contains("sh:path temp:Reading.commissioned ;\n    sh:datatype xsd:date ;"))
     verify(rdf.contains("sh:path temp:Reading.code ;\n    sh:datatype temp:Code ;"))
@@ -680,7 +682,7 @@ class RdfTest : AbstractXetoTest
              Envelope : Dict { failure: Failure? }|>)
     verify(rdf.contains("temp:Failure\n  a sys:Class ;"), rdf)
     verify(rdf.contains("rdfs:subClassOf sys:Err ;"), rdf)
-    verify(propertyShape(rdf, "Envelope.failure").contains("sh:node temp:Failure ;"), rdf)
+    verify(propertyShape(rdf, "Envelope.failure").contains("sh:node temp:Failure-fields ;"), rdf)
 
     ["None", "NA", "Duration", "Version", "Buf", "Span", "Filter", "BuildVar", "LibDependVersions", "LibFilePattern"].each |type|
     {
@@ -771,7 +773,7 @@ class RdfTest : AbstractXetoTest
     verifyFalse(related.contains("sh:maxCount"), related)
 
     address := propertyShape(rdf, "Equip.address")
-    verify(address.contains("sh:node temp:Address ;"), address)
+    verify(address.contains("sh:node temp:Address-fields ;"), address)
     verify(address.contains("sh:minCount 1 ;"), address)
     verify(address.contains("sh:maxCount 1 ;"), address)
   }
@@ -821,7 +823,7 @@ class RdfTest : AbstractXetoTest
              }|>)
 
     equip := instanceBlock(rdf, "equip1")
-    verify(equip.contains("a sys:Entity, temp:Equip ;"), equip)
+    verify(equip.contains("a xetoRdf:Record, temp:Equip ;"), equip)
     verify(equip.contains("temp:Equip.dis \"AHU-1\"^^xsd:string ;"), equip)
     verify(equip.contains("temp:Equip.count \"7\"^^xsd:integer ;"), equip)
     verify(equip.contains("temp:Equip.enabled \"true\"^^xsd:boolean ;"), equip)
@@ -839,10 +841,10 @@ class RdfTest : AbstractXetoTest
     verifyFalse(equip.contains("rdfs:label"), equip)
 
     person := instanceBlock(rdf, "person1")
-    verify(person.contains("temp:Person.address temp:address1 ;"), person)
+    verify(person.contains("xetoRdf:sourceId temp:address1 ;"), person)
     verifyFalse(person.contains("sys:hasRefField temp:Person.address"), person)
     address := instanceBlock(rdf, "address1")
-    verify(address.contains("a sys:Entity, temp:Address ;"), address)
+    verify(address.contains("a xetoRdf:Record, temp:Address ;"), address)
     verify(address.contains("temp:Address.city \"Norfolk\"^^xsd:string ;"), address)
   }
 
@@ -1158,7 +1160,7 @@ class RdfTest : AbstractXetoTest
     verify(rdf.contains("sh:minCount 2 ;"), rdf)
 
     addresses := propertyShape(rdf, "Batch.addresses")
-    verify(addresses.contains("sh:class temp:Address ;"), addresses)
+    verify(addresses.contains("sh:node temp:Address-fields ;"), addresses)
 
     batch := instanceBlock(rdf, "batch1")
     alpha := batch.index("\"alpha\"^^xsd:string")

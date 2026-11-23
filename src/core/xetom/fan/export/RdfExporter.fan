@@ -33,6 +33,8 @@ class RdfExporter : Exporter
 // API
 //////////////////////////////////////////////////////////////////////////
 
+  internal static const Str rdfNamespace := "http://xeto.dev/rdf#"
+
   override This start()
   {
     return this
@@ -89,6 +91,7 @@ class RdfExporter : Exporter
       mixinShape(target, contributions)
     }
     writeQuantityShape
+    writeUnitNameShape
     quantityKeys.keys.sort.each |key|
     {
       qname("sys::UnitQuantity.$key").w(" a ").qname("sys::UnitQuantity")
@@ -109,6 +112,7 @@ class RdfExporter : Exporter
     {
       cls(spec)
       queryMemberClasses(spec.lib)
+      writeUnitNameShape
       return this
     }
     if (spec.isGlobal) return global(spec)
@@ -159,15 +163,16 @@ class RdfExporter : Exporter
       w(".").nl
     }
     writeQuantityShape
+    writeUnitNameShape
     return this
   }
 
   private Str nodeShapeRef(Str name)
   {
-    if (!resultConstraints) return qnameToUri(name)
+    if (!resultConstraints) return qnameToUri(name) + (name == "sys::UnitQuantityShape" ? "" : "-fields")
     lib := requireQNameLibrary(name, "result shape")
     split := name.index("::") ?: throw UnsupportedErr("Invalid result shape name: $name")
-    if (name != "sys::UnitQuantityShape")
+    if (resultConstraints && name != "sys::UnitQuantityShape")
       pendingResultShapes.add(ns.spec(name, false) ?: lib.spec(name[split+2..-1]))
     return "<${libUri(lib)}#${name[split+2..-1]}/constraints>"
   }
@@ -195,6 +200,7 @@ class RdfExporter : Exporter
   {
     w("# baseURI: ").w(libUri(lib)).nl
     nl
+    w("@prefix xetoRdf: <").w(rdfNamespace).w("> .").nl
     w("@prefix owl: <http://www.w3.org/2002/07/owl#> .").nl
     w("@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .").nl
     w("@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .").nl
@@ -323,7 +329,12 @@ class RdfExporter : Exporter
     if (hasShape)
     {
       w("  sh:targetClass ").qname(x.qname).w(" ;").nl
-      typeConstraints(x, props, markers)
+      if (x.isCompound && x.isOr) w("  sh:nodeKind sh:BlankNodeOrIRI ;").nl
+      if (!props.isEmpty || markers.any |s| { !s.isMaybe })
+      {
+        lookupFieldShape(x)
+        fieldConstraints(x, props, markers)
+      }
     }
 
     w(".").nl
@@ -347,6 +358,25 @@ class RdfExporter : Exporter
   }
 
   ** Shared constraints for schema export and query-result conformance.
+  private Void lookupFieldShape(Spec type)
+  {
+    fields := nodeShapeRef(type.qname)
+    w("  sh:or ( [ sh:not [ sh:class xetoRdf:Record ] ] ")
+    if (type.isOr)
+    {
+      libraries := ns.libs.dup
+      if (!libraries.contains(curLib)) libraries.add(curLib)
+      inheritors := RdfQueryCompiler.recordDefinitions(libraries)
+        .findAll |candidate| { inheritsFieldsFrom(candidate, type) }
+        .sort |a, b| { a.qname <=> b.qname }
+      w("[ sh:not [ sh:property [ sh:path sys:spec ; sh:in ( ")
+      inheritors.each |candidate| { qname(candidate.qname).w(" ") }
+      w(") ; sh:minCount 1 ] ] ] ")
+    }
+    w("[ sh:node ").w(fields).w(" ] ) .").nl
+    w(fields).w(" a sh:NodeShape ;").nl
+  }
+
   private Void typeConstraints(Spec x, Spec[] props, Spec[] markers)
   {
     if (x.isCompound && x.isOr)
@@ -361,24 +391,8 @@ class RdfExporter : Exporter
   {
     previousByTag := fieldConstraintsByTag
     fieldConstraintsByTag = resultConstraints || x.isSugar
-    // Union alternatives are members, but do not inherit the union's fields.
-    // Explicit result validation always applies the requested field contract.
-    guardFields := !resultConstraints && x.isOr &&
-      (!props.isEmpty || markers.any |s| { !s.isMaybe })
-    if (guardFields)
-    {
-      libraries := ns.libs.dup
-      if (!libraries.contains(curLib)) libraries.add(curLib)
-      inheritors := RdfQueryCompiler.recordDefinitions(libraries)
-        .findAll |candidate| { inheritsFieldsFrom(candidate, x) }
-        .sort |a, b| { a.qname <=> b.qname }
-      w("  sh:or ( [ sh:not [ sh:property [ sh:path sys:spec ; sh:in ( ")
-      inheritors.each |type| { qname(type.qname).w(" ") }
-      w(") ; sh:minCount 1 ] ] ] [").nl
-    }
     props.each |s| { propShape(s) }
     markers.each |s| { if (!s.isMaybe) markerShape(s) }
-    if (guardFields) w("  ] ) ;").nl
     fieldConstraintsByTag = previousByTag
   }
 
@@ -413,6 +427,7 @@ class RdfExporter : Exporter
       w("  a sh:NodeShape ;").nl
       markers.each |slot| { hasMarker(slot) }
       w("  sh:targetClass ").qname(target.qname).w(" ;").nl
+      lookupFieldShape(target)
       fieldConstraints(target, props, markers)
       w(".").nl
     }
@@ -490,6 +505,14 @@ class RdfExporter : Exporter
         throw UnsupportedErr("RDF query body mapping not supported for member ${member.qname}")
     }
 
+    // A lookup record carries its id in its IRI. A nested Dict carries it on the blank node.
+    if (slot.name == "id" && type.isRef)
+    {
+      min := slot.isMaybe ? "" : "sh:minCount 1 ; "
+      w("  sh:or ( [ sh:nodeKind sh:IRI ] [ sh:nodeKind sh:BlankNode ; sh:property [ sh:path xetoRdf:sourceId ; sh:nodeKind sh:IRI ; ${min}sh:maxCount 1 ] ] ) ;").nl
+      return
+    }
+
     // build constraints
     sh := Str:Obj[:]
     sh.ordered = true
@@ -526,8 +549,16 @@ class RdfExporter : Exporter
       of := slot.of(false)?.qname
       sh["nodeKind"] = "sh:IRI"
       // A stored spec Ref names a schema type, not a runtime Entity.
-      sh["class"] = of == null && slot.name == "spec" ? "rdfs:Class" : qnameToUri(of ?: "sys::Entity")
-      if (of != null && slot.of.isSugar)
+      if (slot.name == "spec" && (of == null || of == "sys::Spec"))
+        sh["class"] = "rdfs:Class"
+      else
+        sh["class"] = of == null ? "xetoRdf:Record" : qnameToUri(of)
+      if (of == "sys::Dict")
+      {
+        sh.remove("class")
+        fitting = dictFitting()
+      }
+      else if (of != null && slot.of.isSugar)
       {
         sh.remove("class")
         fitting = RdfQueryCompiler(ns, curLib).fittingShape(slot.of)
@@ -569,11 +600,8 @@ class RdfExporter : Exporter
     else if (type.isDict)
     {
       sh["node"] = nodeShapeRef(type.qname)
-      if (type.isSugar)
-      {
-        predicate := RdfQueryCompiler(ns, curLib).fittingShape(type)
-        fitting = "sh:or ( [ sh:property [ sh:path sys:spec ; sh:maxCount 0 ] ] [ $predicate ] )"
-      }
+      sh["nodeKind"] = "sh:BlankNode"
+      fitting = inlineFitting(type)
     }
     else if (type.qname == "sys::Obj")
     {
@@ -598,6 +626,8 @@ class RdfExporter : Exporter
     else qname(slot.qname)
     w(" ;").nl
     sh.each |v, n| { w("    sh:").w(n).w(" ").w(v).w(" ;").nl }
+    if ((type.isRef || type.isMultiRef) && slot.name != "spec" && slot.of(false) != null)
+      w("    sh:class xetoRdf:Record ;").nl
     if (fitting != null) w("    ").w(fitting).w(" ;").nl
     if (type.isEnum && type.qname != "sys::Unit" &&
         type.qname != "sys::TimeZone")
@@ -733,16 +763,61 @@ class RdfExporter : Exporter
     return parent.slot(local[dot + 1..-1], false)
   }
 
+  ** Unit constraints on a Number can come from its bounds or fixed value.
+  private Unit[] requiredNumberUnits(Spec slot)
+  {
+    units := Unit[,]
+    units.addNotNull(metaUnit(slot))
+    units.addNotNull((slot.meta["minVal"] as Number)?.unit)
+    units.addNotNull((slot.meta["maxVal"] as Number)?.unit)
+    if (slot.meta.has("invariant")) units.addNotNull((slot.meta["val"] as Number)?.unit)
+    return units.unique
+  }
+
   private Bool isQuantityValueSlot(Spec slot)
   {
     slot.type.qname == "sys::Number" &&
-      (slot.meta["unit"] != null || slot.meta["quantity"] != null)
+      (!requiredNumberUnits(slot).isEmpty || metaQuantity(slot) != null ||
+       (slot.meta.missing("unitless") && slot.meta.missing("invariant")))
   }
 
   private Void quantityValueConstraint(Spec slot)
   {
-    w("    sh:node [").nl
+    units := requiredNumberUnits(slot)
+    allowsLiteral := units.isEmpty && metaQuantity(slot) == null
+    if (units.size > 1 || slot.meta.has("unitless") ||
+        (slot.meta.has("invariant") && (slot.meta["val"] as Number)?.unit == null))
+    {
+      w("    sh:in () ;").nl
+      return
+    }
+    if (allowsLiteral)
+    {
+      w("    sh:or ( [ sh:datatype xsd:double ;").nl
+      scalarConstraints(slot, "xsd:double")
+      w("    ] [").nl
+    }
+    else w("    sh:node [").nl
     w("      sh:class qudt:QuantityValue ;").nl
+    if (units.isEmpty)
+    {
+      needsUnitNames = true
+      w("      sh:node xetoRdf:QuantityUnitNameShape ;").nl
+    }
+    else if (qudt.ambiguousUnitNames.containsKey(qudt.unit(units.first)))
+      w("      sh:property [ sh:path xetoRdf:unitName ; sh:hasValue ").literal(units.first.name).w("^^xsd:string ; sh:maxCount 1 ] ;").nl
+    quantity := metaQuantity(slot)
+    quantityUnits := quantity == null ? null : qudt.unitsByQuantity.get(quantity, Str:Str[:])
+    if (quantityUnits != null)
+    {
+      names := quantityUnits.findAll |iri| { qudt.ambiguousUnitNames.containsKey(iri) }.keys.sort
+      if (!names.isEmpty)
+      {
+        w("      sh:property [ sh:path xetoRdf:unitName ; sh:in ( ")
+        names.each |name| { literal(name).w("^^xsd:string ") }
+        w(") ] ;").nl
+      }
+    }
     w("      sh:property [").nl
     w("        sh:path qudt:numericValue ;").nl
     w("        sh:datatype xsd:double ;").nl
@@ -765,15 +840,33 @@ class RdfExporter : Exporter
     w("      sh:property [").nl
     w("        sh:path qudt:unit ;").nl
     w("        sh:class qudt:Unit ;").nl
-    unit := metaUnit(slot)
-    if (unit != null)
-      w("        sh:hasValue ").w(qudt.unit(unit)).w(" ;").nl
-    quantity := metaQuantity(slot)
-    if (quantity != null) quantityKindConstraint(quantity, "        ")
+    if (!units.isEmpty)
+      w("        sh:hasValue ").w(qudt.unit(units.first)).w(" ;").nl
+    if (quantity != null)
+    {
+      w("        sh:in ( ").w(quantityUnits.vals.unique.sort.join(" ")).w(" ) ;").nl
+      quantityKindConstraint(quantity, "        ")
+    }
     w("        sh:minCount 1 ;").nl
     w("        sh:maxCount 1 ;").nl
     w("      ]").nl
-    w("    ] ;").nl
+    w(allowsLiteral ? "    ] ) ;" : "    ] ;").nl
+  }
+
+  private Void writeUnitNameShape()
+  {
+    if (!needsUnitNames) return
+    groups := qudt.ambiguousUnitNames
+    iris := groups.keys.sort
+    w("xetoRdf:QuantityUnitNameShape a sh:NodeShape ; sh:or (").nl
+    w("  [ sh:not [ sh:property [ sh:path qudt:unit ; sh:in ( ").w(iris.join(" ")).w(" ) ] ] ]").nl
+    iris.each |iri|
+    {
+      w("  [ sh:property [ sh:path qudt:unit ; sh:hasValue ").w(iri).w(" ] ; sh:property [ sh:path xetoRdf:unitName ; sh:minCount 1 ; sh:maxCount 1 ; sh:in ( ")
+      groups[iri].each |name| { literal(name).w("^^xsd:string ") }
+      w(") ] ]").nl
+    }
+    w(") .").nl
   }
 
   private Void quantityKindConstraint(UnitQuantity quantity, Str indent)
@@ -864,7 +957,6 @@ class RdfExporter : Exporter
     minSize := intMeta(slot, "minSize")
     if (slot.meta.has("nonEmpty") && (minSize == null || minSize < 1)) minSize = 1
     maxSize := intMeta(slot, "maxSize")
-    if (of == null && minSize == null && maxSize == null) return
 
     // A Xeto list is one slot value represented by an RDF collection. Validate
     // item values through rdf:first, but count rdf:rest nodes for size so equal
@@ -889,17 +981,26 @@ class RdfExporter : Exporter
         }
       }
       else if (of.isDict)
-        w("        sh:class ").qname(of.qname).w(" ;").nl
+      {
+        w("        ").w(inlineFitting(of)).w(" ;").nl
+        w("        sh:nodeKind sh:BlankNode ;").nl
+        w("        sh:node ").w(nodeShapeRef(of.qname)).w(" ;").nl
+      }
       w("      ] ;").nl
     }
-    if (minSize != null || maxSize != null)
-    {
-      w("      sh:property [").nl
-      w("        sh:path [ sh:zeroOrMorePath rdf:rest ] ;").nl
-      if (minSize != null) w("        sh:minCount ").w(listNodeCount(slot, "minSize", minSize)).w(" ;").nl
-      if (maxSize != null) w("        sh:maxCount ").w(listNodeCount(slot, "maxSize", maxSize)).w(" ;").nl
-      w("      ] ;").nl
-    }
+    w("      sh:property [").nl
+    w("        sh:path [ sh:zeroOrMorePath rdf:rest ] ;").nl
+    w("        sh:hasValue rdf:nil ;").nl
+    w("        sh:or (").nl
+    w("          [ sh:in ( rdf:nil ) ;").nl
+    w("            sh:property [ sh:path rdf:first ; sh:maxCount 0 ], [ sh:path rdf:rest ; sh:maxCount 0 ] ]").nl
+    w("          [ sh:not [ sh:in ( rdf:nil ) ] ;").nl
+    w("            sh:property [ sh:path rdf:first ; sh:minCount 1 ; sh:maxCount 1 ],").nl
+    w("                        [ sh:path rdf:rest ; sh:minCount 1 ; sh:maxCount 1 ] ]").nl
+    w("        ) ;").nl
+    if (minSize != null) w("        sh:minCount ").w(listNodeCount(slot, "minSize", minSize)).w(" ;").nl
+    if (maxSize != null) w("        sh:maxCount ").w(listNodeCount(slot, "maxSize", maxSize)).w(" ;").nl
+    w("      ] ;").nl
     w("    ] ;").nl
   }
 
@@ -908,6 +1009,27 @@ class RdfExporter : Exporter
     if (size == Int.maxVal)
       throw UnsupportedErr("${name} is too large for RDF list-node counting on ${slot.qname}")
     return size + 1
+  }
+
+  private Str inlineFitting(Spec type)
+  {
+    predicate := "sh:class " + qnameToUri(type.qname)
+    if (type.qname == "sys::Dict") predicate = dictFitting()
+    else if (type.isSugar) predicate = RdfQueryCompiler(ns, curLib).fittingShape(type)
+    return "sh:or ( [ sh:property [ sh:path sys:spec ; sh:maxCount 0 ] ] [ $predicate ] )"
+  }
+
+  private Str dictFitting()
+  {
+    predicate := "sh:class " + qnameToUri("sys::Dict")
+    libs := ns.libs.dup
+    if (!libs.contains(curLib)) libs.add(curLib)
+    unions := RdfQueryCompiler.recordDefinitions(libs)
+      .findAll |s| { s.base?.qname == "sys::Or" && RdfQueryResultShaclShapes.isRecordType(s) }
+      .sort |a, b| { a.qname <=> b.qname }
+    if (unions.isEmpty) return predicate
+    branches := unions.map |s->Str| { "[ sh:class " + qnameToUri(s.qname) + " ]" }
+    return "sh:or ( [ $predicate ] " + branches.join(" ") + " )"
   }
 
   private Void validateListItemType(Spec slot, Spec? of)
@@ -1344,6 +1466,11 @@ class RdfExporter : Exporter
   ** The supplied records replace, rather than supplement, library instances.
   This runtimeInstances(Lib lib, Dict[] records)
   {
+    seen := Ref:Bool[:]
+    records.each |record| {
+      if (seen.containsKey(record.id)) throw ArgErr("Duplicate lookup record id: ${record.id}")
+      seen[record.id] = true
+    }
     prepareLibrary(lib)
     records.each |record| { instance(record) }
     return this
@@ -1352,6 +1479,7 @@ class RdfExporter : Exporter
   private Void prepareLibrary(Lib lib)
   {
     this.curLib = lib
+    this.needsUnitNames = false
     this.quantityKeys.clear
     this.instanceMemberSpecs.clear
     this.isSys = lib.name == "sys"
@@ -1361,14 +1489,22 @@ class RdfExporter : Exporter
 
   override This instance(Dict instance)
   {
-    id := instance.id
-
     spec := instanceSpec(instance)
-    this.id(id).nl
-    w("  a ").w(isSys ? ":Entity" : "sys:Entity").w(", ").qname(spec.qname).w(" ;").nl
+    this.id(instance.id).nl
+    w("  a xetoRdf:Record, ").qname(spec.qname).w(" ;").nl
     instanceMembers(instance, spec, "  ")
     spec.slots.each |s| { if (s.isChoice) instanceChoice(instance, s) }
     w(".").nl
+    // Each aliased slot points to one blank node. Writing its fields can
+    // enqueue another aliased slot before this loop finishes.
+    for (i := 0; i < pendingInline.size; ++i)
+    {
+      w("_:inline").w(firstInlineIndex + i).w(" ")
+      pendingInline[i].call
+      w(".").nl
+    }
+    firstInlineIndex += pendingInline.size
+    pendingInline.clear
     return this
   }
 
@@ -1413,11 +1549,47 @@ class RdfExporter : Exporter
       // metadata such as `of` and size constraints remains on that wrapper.
       isMember := slot.isSlot || slot.isGlobal
       type := isMember && slot.type.isList ? slot : (isMember ? slot.type : slot)
-      instanceProperties(slot, instanceProperty(spec, member)).each |property|
+      if (type.qname == "sys::Obj") type = instanceValueSpec(val) ?: type
+      properties := instanceProperties(slot, instanceProperty(spec, member))
+      if (properties.size > 1 && type.isList && val is List && !((List)val).isEmpty)
+      {
+        items := (List)val
+        sharedInline(properties, indent) |->Void|
+        {
+          of := type.of(false)
+          validateListItemType(type, of)
+          w("rdf:first ")
+          instanceListItem(properties.first, of, items.first, "")
+          w(" ; rdf:rest ( ")
+          items.eachRange(1..-1) |item| { instanceListItem(properties.first, of, item, ""); w(" ") }
+          w(") ")
+        }
+        return
+      }
+      if (properties.size > 1 && val is Dict && (type.isDict || type.qname == "sys::Obj") && !type.isMultiRef)
+      {
+        sharedInline(properties, indent) |->Void| { inlineMembers(val, type, "") }
+        return
+      }
+      num := val as Number
+      if (properties.size > 1 && type.qname == "sys::Number" && num?.unit != null)
+      {
+        sharedInline(properties, indent) |->Void| { quantityMembers(properties.first, num, "") }
+        return
+      }
+      properties.each |property|
       {
         instanceMember(property, type, val, indent)
       }
     }
+  }
+
+  ** Write one value node per stored occurrence and link every slot alias to it.
+  private Void sharedInline(Str[] properties, Str indent, |->Void| members)
+  {
+    node := "_:inline" + (firstInlineIndex + pendingInline.size)
+    pendingInline.add(members)
+    properties.each |p| { w(indent).qname(p).w(" ").w(node).w(" ;").nl }
   }
 
   internal static Str[] instanceProperties(Spec spec, Str property)
@@ -1569,7 +1741,9 @@ class RdfExporter : Exporter
     if (type.isDict)
     {
       nested := val as Dict ?: throw UnsupportedErr("Expected Dict for ${property}, not ${val.typeof}")
-      instanceNested(property, nested, indent)
+      w(indent).qname(property).w(" ")
+      inlineDict(nested, type, indent)
+      w(" ;").nl
       return
     }
 
@@ -1578,7 +1752,9 @@ class RdfExporter : Exporter
       num := val as Number
       if (type.qname == "sys::Number" && num != null && num.unit != null)
       {
-        instanceQuantityValue(property, num, indent)
+        w(indent).qname(property).w(" [").nl
+        quantityMembers(property, num, indent)
+        w(indent).w("] ;").nl
         return
       }
       w(indent).qname(property).w(" ")
@@ -1599,15 +1775,16 @@ class RdfExporter : Exporter
     throw UnsupportedErr("RDF instance value mapping not supported for ${property} of ${type.qname}")
   }
 
-  private Void instanceQuantityValue(Str property, Number num, Str indent)
+  private Void quantityMembers(Str property, Number num, Str indent)
   {
     unit := num.unit ?: throw UnsupportedErr("Expected unit-bearing Number for ${property}")
     value := doubleLexical(num.toFloat.toStr, property)
-    w(indent).qname(property).w(" [").nl
     w(indent).w("  a qudt:QuantityValue ;").nl
     w(indent).w("  qudt:numericValue ").literal(value).w("^^xsd:double ;").nl
-    w(indent).w("  qudt:unit ").w(qudt.unit(unit)).nl
-    w(indent).w("] ;").nl
+    iri := qudt.unit(unit)
+    if (qudt.ambiguousUnitNames.containsKey(iri))
+      w(indent).w("  xetoRdf:unitName ").literal(unit.name).w("^^xsd:string ;").nl
+    w(indent).w("  qudt:unit ").w(iri).nl
   }
 
   private Void instanceMultiRef(Str property, Obj val, Str indent)
@@ -1650,20 +1827,32 @@ class RdfExporter : Exporter
     w(indent).w(isSys ? ":hasRefField" : "sys:hasRefField").w(" ").qname(property).w(" ;").nl
   }
 
-  private Void instanceNested(Str property, Dict nested, Str indent)
+  private Void inlineDict(Dict nested, Spec context, Str indent)
   {
-    nestedId := nested["id"] as Ref
+    w("[").nl
+    inlineMembers(nested, context, indent)
+    w(indent).w("]")
+  }
+
+  private Void inlineMembers(Dict nested, Spec context, Str indent)
+  {
+    nestedSpec := !nested.has("spec") && context.isDict ? context : instanceSpec(nested)
+    w(indent).w("  a ").qname(nestedSpec.qname).w(" ;").nl
+    nestedId := nested["id"]
     if (nestedId != null)
     {
-      w(indent).qname(property).w(" ").id(nestedId).w(" ;").nl
-      return
+      w(indent).w("  xetoRdf:sourceId ")
+      type := instanceValueSpec(nestedId)
+      if (nestedId is Ref) id(nestedId)
+      else if (type != null && type.isScalar && !type.isMarker &&
+               type.qname != "sys::Unit" && type.qname != "sys::UnitQuantity" &&
+               (nestedId as Number)?.unit == null)
+        typedLiteral(nestedId, type, "id")
+      else w("[]")
+      w(" ;").nl
     }
-
-    nestedSpec := instanceSpec(nested)
-    w(indent).qname(property).w(" [").nl
-    w(indent).w("  a ").qname(nestedSpec.qname).w(" ;").nl
     instanceMembers(nested, nestedSpec, indent + "  ")
-    w(indent).w("] ;").nl
+    nestedSpec.slots.each |s| { if (s.isChoice) instanceChoice(nested, s) }
   }
 
   private Void instanceList(Str property, Spec listType, Obj val, Str indent)
@@ -1703,18 +1892,7 @@ class RdfExporter : Exporter
     if (type.isDict)
     {
       nested := item as Dict ?: throw UnsupportedErr("Expected Dict item for ${property}, not ${item.typeof}")
-      nestedId := nested["id"] as Ref
-      if (nestedId != null)
-      {
-        id(nestedId)
-        return
-      }
-
-      nestedSpec := instanceSpec(nested)
-      w("[").nl
-      w(indent).w("  a ").qname(nestedSpec.qname).w(" ;").nl
-      instanceMembers(nested, nestedSpec, indent + "  ")
-      w(indent).w("]")
+      inlineDict(nested, type, indent)
       return
     }
 
@@ -1937,6 +2115,9 @@ class RdfExporter : Exporter
 // Fields
 //////////////////////////////////////////////////////////////////////////
 
+  private Bool needsUnitNames
+  private Int firstInlineIndex
+  private |->Void|[] pendingInline := [,]
   private Bool isSys
   private Bool resultConstraints
   private Bool fieldConstraintsByTag
