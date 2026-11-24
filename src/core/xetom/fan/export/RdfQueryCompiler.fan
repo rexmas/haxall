@@ -99,7 +99,7 @@ class RdfQueryCompiler
     traversal := RdfReferenceTraversal(tag, properties.keys.sort, repetition, direction, step)
     sugar := target.isSugar ? resolveSugar(target) : null
     return RdfQueryPlan(query.qname, target, traversal, classes.keys.sort,
-      RdfExporter.rdfNamespace + "Record", iri("sys::hasMarker"), iri("sys::hasRefField"), sugar)
+      RdfExporter.rdfNamespace + "Record", RdfExporter.rdfNamespace + "hasMarker", sugar)
   }
 
   ** SHACL Core fitting predicate; this does not validate the target's fields.
@@ -120,11 +120,8 @@ class RdfQueryCompiler
       {
         case RdfSugarValueKind.presence:
           alternatives := ["[ sh:property [ sh:path $path ; sh:minCount 1 ] ]"]
-          ["sys::hasMarker", "sys::hasRefField"].each |tag|
-          {
-            evidence := RdfQuerySparqlCompiler.iriToken(iri(tag))
-            alternatives.add("[ sh:property [ sh:path $evidence ; sh:qualifiedValueShape [ sh:in ( $propertyList ) ] ; sh:qualifiedMinCount 1 ] ]")
-          }
+          evidence := RdfQuerySparqlCompiler.iriToken(RdfExporter.rdfNamespace + "hasMarker")
+          alternatives.add("[ sh:property [ sh:path $evidence ; sh:qualifiedValueShape [ sh:in ( $propertyList ) ] ; sh:qualifiedMinCount 1 ] ]")
           structural.add("sh:or ( " + alternatives.join(" ") + " )")
         case RdfSugarValueKind.string:
           literal := RdfExporter.stringLiteral(constraint.value)
@@ -253,7 +250,7 @@ class RdfQueryCompiler
       throw UnsupportedErr("Query requirement must be a record type: $target.qname")
     classes := recordDefinitions(libraries.vals).findAll |s| { s.fits(target) }.map |s->Str| { iri(s.qname) }
     return RdfQueryPlan(original.querySlot, target, original.traversal, classes,
-      original.recordClassIri, original.markerPredicateIri, original.hasRefFieldPredicateIri,
+      original.recordClassIri, original.markerPredicateIri,
       target.isSugar ? resolveSugar(target) : null)
   }
 
@@ -341,7 +338,7 @@ const class RdfQueryPlan
 {
   internal new make(Str querySlot, Spec resultType, RdfReferenceTraversal traversal,
                     Str[] resultClassIris, Str recordClassIri,
-                    Str markerPredicateIri, Str hasRefFieldPredicateIri, RdfSugarMatch? sugar := null)
+                    Str markerPredicateIri, RdfSugarMatch? sugar := null)
   {
     this.querySlot = querySlot
     this.resultType = resultType
@@ -349,7 +346,6 @@ const class RdfQueryPlan
     this.resultClassIris = resultClassIris.toImmutable
     this.recordClassIri = recordClassIri
     this.markerPredicateIri = markerPredicateIri
-    this.hasRefFieldPredicateIri = hasRefFieldPredicateIri
     this.sugar = sugar
   }
 
@@ -361,7 +357,6 @@ const class RdfQueryPlan
   ** Record-existence class used by plans compiled before the name changed.
   @Deprecated Str entityClassIri() { recordClassIri }
   const Str markerPredicateIri
-  const Str hasRefFieldPredicateIri
   const RdfSugarMatch? sugar
 }
 
@@ -460,12 +455,6 @@ internal class RdfQuerySparqlCompiler
     }
     out.add("  $resultVar a ${iriToken(plan.recordClassIri)} .\n")
     out.add("  FILTER(isIRI($resultVar))\n")
-    if (plan.traversal.step != RdfQueryStep.identity && plan.traversal.direction == RdfQueryDirection.inverse && plan.traversal.repetition == RdfQueryRepetition.oneHop)
-    {
-      // Native direct inverse compares IDs without dereferencing non-Refs.
-      properties := plan.traversal.propertyIris.map |p->Str| { iriToken(p) }.join(" ")
-      out.add("  FILTER EXISTS { VALUES ?referenceProperty { $properties } $resultVar ${iriToken(plan.hasRefFieldPredicateIri)} ?referenceProperty ; ?referenceProperty ?subject . }\n")
-    }
     out.add(renderResultMatch(resultVar))
     return out.add("}\n").toStr
   }
@@ -489,7 +478,7 @@ internal class RdfQuerySparqlCompiler
         stored := "EXISTS { VALUES $property { $properties } $resultVar $property $value ."
         switch (constraint.kind)
         {
-          case RdfSugarValueKind.presence: predicates.add("($stored } || EXISTS { VALUES $property { $properties } $resultVar ${iriToken(plan.markerPredicateIri)} $property . } || EXISTS { VALUES $property { $properties } $resultVar ${iriToken(plan.hasRefFieldPredicateIri)} $property . })")
+          case RdfSugarValueKind.presence: predicates.add("($stored } || EXISTS { VALUES $property { $properties } $resultVar ${iriToken(plan.markerPredicateIri)} $property . })")
           case RdfSugarValueKind.string: predicates.add("$stored FILTER($value = ${RdfExporter.stringLiteral(constraint.value)}) }")
           case RdfSugarValueKind.boolean: predicates.add("$stored FILTER($value = $constraint.value) }")
           case RdfSugarValueKind.integer: predicates.add("$stored FILTER(datatype($value) IN (<http://www.w3.org/2001/XMLSchema#integer>, <http://www.w3.org/2001/XMLSchema#double>) && $value = $constraint.value) }")
@@ -567,16 +556,6 @@ internal class RdfQueryInputShaclCompiler
     paths := properties.join(" ")
     path := properties.size == 1 ? properties.first : "[ sh:alternativePath ( $paths ) ]"
     checks := StrBuf()
-    evidence := RdfQuerySparqlCompiler.iriToken(plan.hasRefFieldPredicateIri)
-    // A dangling Ref is still a Ref. Check the owning field's stored value
-    // kind, rather than requiring the referenced record to exist.
-    properties.each |property|
-    {
-      checks.add("sh:node [ sh:message \"Missing reference-field evidence\" ; sh:or (\n")
-      checks.add(" [ sh:property [ sh:path $property ; sh:maxCount 0 ] ]\n")
-      checks.add(" [ sh:property [ sh:path $evidence ; sh:hasValue $property ] ]\n")
-      checks.add(") ] ;\n")
-    }
     checks.add("sh:property [ sh:path $path ; sh:nodeKind sh:IRI ; sh:message \"Invalid reference value: expected an IRI\" ] ;\n")
     marker := RdfQuerySparqlCompiler.iriToken(plan.markerPredicateIri)
     checks.add("sh:property [ sh:path $marker ; sh:not [ sh:in ( $paths ) ] ; sh:message \"Invalid reference value: Marker\" ]")

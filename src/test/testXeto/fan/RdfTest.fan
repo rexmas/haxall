@@ -56,7 +56,7 @@ class RdfTest : AbstractXetoTest
       verifyEq(specRef.plan.traversal.step, RdfQueryStep.specReference)
       verifyEq(specRef.plan.traversal.propertyIris.size, 1)
       verify(specRef.plan.traversal.propertyIris.first.endsWith("#spec"))
-      verify(specRef.inputShapes.contains("#hasRefField>"))
+      verifyFalse(specRef.inputShapes.contains("#hasRefField>"))
     }
     // Native execution does not resolve unqualified inverse Query names.
     verifyErr(UnsupportedErr#) { compiler.resolve("Holder.inverse") }
@@ -70,7 +70,7 @@ class RdfTest : AbstractXetoTest
     verify(direct.boundSparql.contains("VALUES ?subject { <urn:source> }"))
     verifyFalse(direct.sparql.contains("VALUES ?subject"))
     verify(deep.inputShapes.contains("sh:zeroOrMorePath"))
-    verify(direct.inputShapes.contains("#hasRefField>"))
+    verifyFalse(direct.inputShapes.contains("#hasRefField>"))
     verify(direct.resultShapes.resultShapeIri.endsWith("#Target/constraints"))
     verifyErr(ReadonlyErr#) { direct.plan.resultClassIris.clear }
     verifyErr(ArgErr#) { compiler.compile("Holder.direct", "urn:a> ?x ?y") }
@@ -141,10 +141,10 @@ class RdfTest : AbstractXetoTest
            Link: Dict { value: Ref<of:Hot>, values: MultiRef<of:Hot> }
            Nested: Dict { value: Hot }|>)
     link := RdfQueryResultShaclShapes.compile(ns, lib.spec("Link")).turtleShapes
-    // Fitting accepts anchor records through stored-field/marker/Ref evidence.
+    // Fitting accepts anchor records through stored values or markers.
     verify(link.contains("#Target>"), link)
-    verify(link.contains("#hasMarker>"), link)
-    verify(link.contains("#hasRefField>"), link)
+    verify(link.contains("<http://xeto.dev/rdf#hasMarker>"), link)
+    verifyFalse(link.contains("#hasRefField>"), link)
     verify(link.contains("sh:qualifiedMinCount 1"), link)
     // The defaulted label is a validation requirement, not a fitting predicate.
     verifyFalse(link.contains(".label>"), link)
@@ -188,7 +188,7 @@ class RdfTest : AbstractXetoTest
            @reading: Child {}|>, Etc.dict1("instancesOnly", Marker.val))
     reading := instanceBlock(rdf, "reading")
     verify(reading.contains("sys:spec temp:Child"), reading)
-    verify(reading.contains("sys:hasRefField sys:spec"), reading)
+    verifyFalse(reading.contains("sys:hasRefField sys:spec"), reading)
     verifyFalse(reading.contains("sys:spec temp:Base"), reading)
   }
 
@@ -237,7 +237,7 @@ class RdfTest : AbstractXetoTest
     verifyFalse(untypedRdf.contains("sys:hasRefField"), untypedRdf)
     typedRdf := instanceBlock(rdf, "typed")
     verify(typedRdf.contains("sys:spec temp:Record"), typedRdf)
-    verify(typedRdf.contains("sys:hasRefField sys:spec"), typedRdf)
+    verifyFalse(typedRdf.contains("sys:hasRefField sys:spec"), typedRdf)
     verifyFalse(rdf.contains("temp:libraryRecord"), rdf)
   }
 
@@ -294,14 +294,14 @@ class RdfTest : AbstractXetoTest
       {
         case RdfQueryRepetition.oneHop:
           verify(artifacts.boundSparql.contains("?subject ^(<$specIri>) ?result"))
-          verify(artifacts.boundSparql.contains("?referenceProperty ?subject"))
+          verifyFalse(artifacts.boundSparql.contains("?referenceProperty ?subject"))
           verifyFalse(artifacts.inputShapes.contains("sh:targetClass"))
           verifyFalse(artifacts.inputShapes.contains("hasRefField"))
         case RdfQueryRepetition.oneOrMore:
           verify(artifacts.boundSparql.contains("?subject ^(<$specIri>)+ ?result"))
           verifyFalse(artifacts.boundSparql.contains("?referenceProperty ?subject"))
           verify(artifacts.inputShapes.contains("sh:targetClass"))
-          verify(artifacts.inputShapes.contains("hasRefField"))
+          verifyFalse(artifacts.inputShapes.contains("hasRefField"))
         default: fail("Unhandled repetition: $repetition")
       }
     }
@@ -372,8 +372,8 @@ class RdfTest : AbstractXetoTest
     verify(rdf.contains("temp:Employee\n  a sys:Class ;\n  a rdfs:Class ;\n  a sh:NodeShape ;"))
     verify(rdf.contains("sh:targetClass temp:Employee ;"))
     verify(rdf.contains("sh:path temp:Person.dis ;"))
-    verifyEq(countMatches(rdf, "sys:hasMarker temp:Person.active ;"), 2)
-    verifyEq(countMatches(rdf, "sys:hasMarker temp:Person.temporary ;"), 2)
+    verifyEq(countMatches(rdf, "xetoRdf:hasMarker temp:Person.active ;"), 2)
+    verifyEq(countMatches(rdf, "xetoRdf:hasMarker temp:Person.temporary ;"), 2)
     verifyEq(countMatches(rdf, "sh:hasValue temp:Person.active ;"), 2)
     verifyEq(countMatches(rdf, "sh:hasValue temp:Person.temporary ;"), 0)
     verifyEq(countMatches(rdf, "rdfs:comment \"A person\"@en ;"), 1)
@@ -590,7 +590,7 @@ class RdfTest : AbstractXetoTest
     verify(equip.contains("temp:Equip.names ("), equip)
     verify(equip.contains("temp:Equip.heatingProcesses temp:HotWaterHeating ;"), equip)
     verify(equip.contains("qudt:numericValue \"50.0\"^^xsd:double ;"), equip)
-    verify(equip.contains("sys:hasMarker temp:Equip.imported ;"), equip)
+    verify(equip.contains("xetoRdf:hasMarker temp:Equip.imported ;"), equip)
     verifyFalse(equip.contains("temp:Equip.points"), equip)
 
     firstName := equip.index("\"first\"^^xsd:string")
@@ -831,13 +831,13 @@ class RdfTest : AbstractXetoTest
     verify(equip.contains("temp:Equip.suit \"Clubs\"^^xsd:string ;"), equip)
     verify(equip.contains("temp:Equip.siteRef temp:site1 ;"), equip)
     verifyEq(countMatches(equip, "temp:Equip.related temp:"), 2)
-    verify(equip.contains("sys:hasRefField temp:Equip.related ;"), equip)
-    verify(equip.contains("sys:hasRefField temp:Equip.siteRef ;"), equip)
-    verify(equip.contains("sys:hasMarker temp:Equip.equip ;"), equip)
+    verifyFalse(equip.contains("sys:hasRefField temp:Equip.related ;"), equip)
+    verifyFalse(equip.contains("sys:hasRefField temp:Equip.siteRef ;"), equip)
+    verify(equip.contains("xetoRdf:hasMarker temp:Equip.equip ;"), equip)
     verify(equip.contains("temp:Equip.address [\n    a temp:Address ;"), equip)
     verify(equip.contains("temp:Address.city \"Richmond\"^^xsd:string ;"), equip)
     verify(equip.contains("temp:Equip.nickname \"Air handler\"^^xsd:string ;"), equip)
-    verify(equip.contains("sys:hasMarker temp:Equip.imported ;"), equip)
+    verify(equip.contains("xetoRdf:hasMarker temp:Equip.imported ;"), equip)
     verifyFalse(equip.contains("rdfs:label"), equip)
 
     person := instanceBlock(rdf, "person1")
@@ -886,7 +886,7 @@ class RdfTest : AbstractXetoTest
 
     hotWater := resourceBlock(rdf, "temp:HotWaterHeating")
     verify(hotWater.contains("rdfs:subClassOf temp:HeatingProcess ;"), hotWater)
-    verify(hotWater.contains("sys:hasMarker temp:HotWaterHeating.hotWaterHeating ;"), hotWater)
+    verify(hotWater.contains("xetoRdf:hasMarker temp:HotWaterHeating.hotWaterHeating ;"), hotWater)
     verify(rdf.contains("temp:HotWaterHeating.hotWaterHeating\n  a sys:Marker ;"), rdf)
 
     required := propertyShape(rdf, "RequiredEquip.heatingProcess")
@@ -909,7 +909,7 @@ class RdfTest : AbstractXetoTest
     equip := instanceBlock(rdf, "equip1")
     verify(equip.contains("temp:MultiEquip.heatingProcesses temp:HotWaterHeating ;"), equip)
     verify(equip.contains("temp:MultiEquip.heatingProcesses temp:SteamHeating ;"), equip)
-    verifyFalse(equip.contains("sys:hasMarker"), equip)
+    verifyFalse(equip.contains("xetoRdf:hasMarker"), equip)
   }
 
   Void testLibraryProjectionProfiles()
@@ -922,7 +922,7 @@ class RdfTest : AbstractXetoTest
 
     instances := exportWithOpts(src, Etc.makeDict(["instancesOnly":Marker.val]))
     verify(instances.contains("temp:widget1"), instances)
-    verify(instances.contains("sys:hasMarker temp:Widget.widget"), instances)
+    verify(instances.contains("xetoRdf:hasMarker temp:Widget.widget"), instances)
     verifyFalse(instances.contains("a sh:NodeShape"), instances)
     verifyFalse(instances.contains("a owl:Ontology"), instances)
 
@@ -948,12 +948,12 @@ class RdfTest : AbstractXetoTest
 
     entity := instanceBlock(rdf, "entity1")
     verify(entity.contains("temp:Entity.orgRef temp:org1 ;"), entity)
-    verify(entity.contains("sys:hasRefField temp:Entity.orgRef ;"), entity)
+    verifyFalse(entity.contains("sys:hasRefField temp:Entity.orgRef ;"), entity)
     verifyFalse(entity.contains("sys:Entity.orgRef"), entity)
 
     employee := instanceBlock(rdf, "employee1")
     verify(employee.contains("temp:Entity.orgRef temp:org1 ;"), employee)
-    verify(employee.contains("sys:hasRefField temp:Entity.orgRef ;"), employee)
+    verifyFalse(employee.contains("sys:hasRefField temp:Entity.orgRef ;"), employee)
     verifyFalse(employee.contains("temp:Employee.orgRef"), employee)
   }
 
@@ -1206,7 +1206,7 @@ class RdfTest : AbstractXetoTest
 
     point := instanceBlock(rdf, "point1")
     verify(point.contains("temp:Point.equipRef temp:equip1 ;"), point)
-    verify(point.contains("sys:hasRefField temp:Point.equipRef ;"), point)
+    verifyFalse(point.contains("sys:hasRefField temp:Point.equipRef ;"), point)
     equip := instanceBlock(rdf, "equip1")
     verifyFalse(equip.contains("temp:Equip.points"), equip)
   }

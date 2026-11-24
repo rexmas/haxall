@@ -60,7 +60,6 @@ class RdfExporter : Exporter
 
     if (isSys)
     {
-      sysDefs
       types = types.dup.moveTo(types.find { it.name == "Obj" }, 0)
     }
 
@@ -255,14 +254,6 @@ class RdfExporter : Exporter
            rdfs:label "Class"@en ;
            rdfs:subClassOf rdfs:Class ;
          .
-         sys:HasMarkerShape
-           a sh:NodeShape ;
-           sh:targetSubjectsOf sys:hasMarker ;
-           sh:property [
-              sh:path sys:hasMarker ;
-              sh:class sys:Marker ;
-           ]
-           .
   |>)
   }
 
@@ -272,6 +263,8 @@ class RdfExporter : Exporter
 
   private This cls(Spec x)
   {
+    // Include the shared sys vocabulary when exporting the root type on its own.
+    if (x.qname == "sys::Obj") sysDefs
     // Vocabulary is declared from slotsOwn below, but validation uses the
     // effective slot view so subclasses receive inherited constraints.
     props   := Spec[,]
@@ -441,15 +434,13 @@ class RdfExporter : Exporter
 
   private Void hasMarker(Spec slot)
   {
-    prop := isSys ? ":hasMarker" : "sys:hasMarker"
-    w("  ").w(prop).w(" ").qname(slot.qname).w(" ;").nl
+    w("  xetoRdf:hasMarker ").qname(slot.qname).w(" ;").nl
   }
 
   private Void markerShape(Spec slot)
   {
-    prop := isSys ? ":hasMarker" : "sys:hasMarker"
     w("  sh:property [").nl
-    w("    sh:path ").w(prop).w(" ;").nl
+    w("    sh:path xetoRdf:hasMarker ;").nl
     if (fieldConstraintsByTag)
       w("    sh:qualifiedValueShape [ sh:in ( ").w(resultFieldProperties(slot.name).join(" ")).w(" ) ] ; sh:qualifiedMinCount 1 ;").nl
     else
@@ -1674,7 +1665,7 @@ class RdfExporter : Exporter
   {
     if (val == Marker.val)
     {
-      w(indent).w(isSys ? ":hasMarker" : "sys:hasMarker").w(" ").qname(property).w(" ;").nl
+      w(indent).w("xetoRdf:hasMarker ").qname(property).w(" ;").nl
       return
     }
 
@@ -1682,14 +1673,12 @@ class RdfExporter : Exporter
     {
       ref := val as Ref ?: throw UnsupportedErr("Expected Ref for ${property}, not ${val.typeof}")
       instanceRefValue(property, ref, indent)
-      refField(property, indent)
       return
     }
 
     if (type.isMultiRef)
     {
       instanceMultiRef(property, val, indent)
-      refField(property, indent)
       return
     }
 
@@ -1820,11 +1809,6 @@ class RdfExporter : Exporter
   private Void instanceRefValue(Str property, Ref ref, Str indent)
   {
     w(indent).qname(property).w(" ").id(ref).w(" ;").nl
-  }
-
-  private Void refField(Str property, Str indent)
-  {
-    w(indent).w(isSys ? ":hasRefField" : "sys:hasRefField").w(" ").qname(property).w(" ;").nl
   }
 
   private Void inlineDict(Dict nested, Spec context, Str indent)
